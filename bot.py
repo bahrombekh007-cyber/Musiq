@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎵 TELEGRAM MUSIC BOT 2026 - Ultimate Version
+🎵 TELEGRAM MUSIC BOT 2026 - Ultimate Fixed Version
 Instagram, TikTok, Shazam, YouTube Music Search
 Muallif: @Rustamov_v1
 """
@@ -18,21 +18,22 @@ import signal
 import json
 import logging
 import threading
-from importlib.metadata import version
+import traceback
+from importlib.metadata import version, PackageNotFoundError
 from pathlib import Path
 from typing import Optional, Dict, List, Union, Any, Tuple
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
 
 # ==================== KUTUBXONALAR ====================
 try:
     import telebot
     from telebot import types
     from telebot.apihelper import ApiTelegramException
-    from telebot.async_telebot import AsyncTeleBot
     TELEBOT_AVAILABLE = True
-except ImportError:
-    print("❌ telebot kutubxonasi topilmadi! O'rnatish: pip install pyTelegramBotAPI")
+except ImportError as e:
+    print(f"❌ telebot kutubxonasi topilmadi! O'rnatish: pip install pyTelegramBotAPI")
+    print(f"Xato: {e}")
     sys.exit(1)
 
 try:
@@ -49,24 +50,17 @@ except ImportError:
     print("❌ yt-dlp kutubxonasi topilmadi! O'rnatish: pip install yt-dlp")
     sys.exit(1)
 
-try:
-    import aiohttp
-    import aiofiles
-    AIO_AVAILABLE = True
-except ImportError:
-    print("⚠️ aiohttp kutubxonasi topilmadi. O'rnatish: pip install aiohttp aiofiles")
-    AIO_AVAILABLE = False
-
 # ==================== SOZLAMALAR ====================
 class Config:
-    # Telegram Bot Token
+    # Telegram Bot Token (O'zingizning token'ingizni qo'ying)
     BOT_TOKEN = "8575775719:AAFk71ow9WR7crlONGpnP56qAZjO88Hj4eI"
     
     # Fayllar
     TEMP_DIR = Path("temp_files")
-    TEMP_DIR.mkdir(exist_ok=True)
+    TEMP_DIR.mkdir(exist_ok=True, parents=True)
     COOKIES_FILE = TEMP_DIR / "youtube_cookies.txt"
     SESSIONS_FILE = TEMP_DIR / "sessions.json"
+    LOG_FILE = "music_bot.log"
     
     # Cheklovlar
     MAX_FILE_SIZE = 49 * 1024 * 1024  # 49MB (Telegram limit: 50MB)
@@ -80,35 +74,25 @@ class Config:
     RATE_LIMIT_DELAY = 2  # soniya
     
     # Logging
-    LOG_FILE = "music_bot.log"
     LOG_LEVEL = logging.INFO
     
     # Browser cookies paths
     BROWSER_PATHS = {
         'chrome': [
-            '~/.config/google-chrome',
-            '~/.config/chromium',
-            '~/AppData/Local/Google/Chrome/User Data',
-            '~/Library/Application Support/Google/Chrome'
+            str(Path.home() / '.config' / 'google-chrome'),
+            str(Path.home() / '.config' / 'chromium'),
+            str(Path.home() / 'AppData' / 'Local' / 'Google' / 'Chrome' / 'User Data'),
+            str(Path.home() / 'Library' / 'Application Support' / 'Google' / 'Chrome'),
         ],
         'firefox': [
-            '~/.mozilla/firefox',
-            '~/Library/Application Support/Firefox',
-            '~/AppData/Roaming/Mozilla/Firefox'
+            str(Path.home() / '.mozilla' / 'firefox'),
+            str(Path.home() / 'Library' / 'Application Support' / 'Firefox'),
+            str(Path.home() / 'AppData' / 'Roaming' / 'Mozilla' / 'Firefox'),
         ],
         'brave': [
-            '~/.config/BraveSoftware/Brave-Browser',
-            '~/Library/Application Support/BraveSoftware/Brave-Browser'
+            str(Path.home() / '.config' / 'BraveSoftware' / 'Brave-Browser'),
+            str(Path.home() / 'Library' / 'Application Support' / 'BraveSoftware' / 'Brave-Browser'),
         ]
-    }
-    
-    # YouTube extractor args (PO Token muammolari uchun)
-    YOUTUBE_EXTRACTOR_ARGS = {
-        'youtube': {
-            'player_client': ['android', 'ios', 'web', 'tv', 'mweb'],
-            'player_skip': ['configs'],
-            'throttled_rate': 'no',
-        }
     }
 
 # ==================== LOGGING ====================
@@ -128,6 +112,7 @@ class ColoredFormatter(logging.Formatter):
         return f"{log_color}{message}{self.COLORS['RESET']}"
 
 # Loggerni sozlash
+logging.basicConfig(level=Config.LOG_LEVEL)
 logger = logging.getLogger(__name__)
 logger.setLevel(Config.LOG_LEVEL)
 
@@ -139,15 +124,23 @@ console_formatter = ColoredFormatter(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
 
 # File handler
-file_handler = logging.FileHandler(Config.LOG_FILE, encoding='utf-8')
+file_handler = logging.FileHandler(Config.LOG_FILE, encoding='utf-8', mode='a')
 file_handler.setLevel(Config.LOG_LEVEL)
 file_formatter = logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 file_handler.setFormatter(file_formatter)
+
+# Handlerni qo'shish
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+# Oldingi handlerlarni o'chirish (duplicate loglarni oldini olish uchun)
+if logger.hasHandlers():
+    logger.handlers.clear()
+logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
 # UTF-8 encoding
@@ -173,8 +166,9 @@ class GlobalState:
         self.download_tasks: Dict[str, Dict] = {}
         self.rate_limits: Dict[int, datetime] = {}
         self.cookies_available = False
-        self.executor = ThreadPoolExecutor(max_workers=10)
-        self.bot = None
+        self.executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="MusicBot")
+        self.bot_instance = None
+        self.running = False
         
         # Sessionlarni yuklash
         self.load_sessions()
@@ -184,26 +178,34 @@ class GlobalState:
     
     def check_cookies(self):
         """Cookie faylini tekshirish"""
-        if Config.COOKIES_FILE.exists():
-            try:
-                content = Config.COOKIES_FILE.read_text(encoding='utf-8')
-                if content.strip() and 'youtube.com' in content:
+        try:
+            if Config.COOKIES_FILE.exists():
+                content = Config.COOKIES_FILE.read_text(encoding='utf-8', errors='ignore')
+                if content.strip() and ('.youtube.com' in content or 'youtube.com' in content):
                     self.cookies_available = True
                     logger.info("✅ YouTube cookie fayli topildi")
                 else:
                     logger.warning("⚠️ Cookie fayli bo'sh yoki noto'g'ri formatda")
-            except Exception as e:
-                logger.error(f"❌ Cookie faylini o'qishda xatolik: {e}")
+                    self.cookies_available = False
+            else:
+                logger.warning("⚠️ YouTube cookie fayli topilmadi")
+                self.cookies_available = False
+        except Exception as e:
+            logger.error(f"❌ Cookie faylini o'qishda xatolik: {e}")
+            self.cookies_available = False
     
     def load_sessions(self):
         """Sessionlarni yuklash"""
         try:
             if Config.SESSIONS_FILE.exists():
                 with open(Config.SESSIONS_FILE, 'r', encoding='utf-8') as f:
-                    self.user_sessions = json.load(f)
+                    loaded = json.load(f)
+                    # Faqat int key'larni qabul qilish
+                    self.user_sessions = {int(k): v for k, v in loaded.items()}
                 logger.info(f"✅ {len(self.user_sessions)} ta session yuklandi")
         except Exception as e:
             logger.error(f"❌ Sessionlarni yuklashda xatolik: {e}")
+            self.user_sessions = {}
     
     def save_sessions(self):
         """Sessionlarni saqlash"""
@@ -221,6 +223,10 @@ class GlobalState:
             if (now - last_request).seconds < 2:  # 2 soniya
                 return False
         self.rate_limits[user_id] = now
+        # Eski recordlarni tozalash
+        to_delete = [uid for uid, dt in self.rate_limits.items() if (now - dt).seconds > 60]
+        for uid in to_delete:
+            del self.rate_limits[uid]
         return True
 
 state = GlobalState()
@@ -233,14 +239,14 @@ def cleanup_old_files() -> None:
         deleted_count = 0
         
         for filepath in Config.TEMP_DIR.iterdir():
-            if filepath.is_file() and filepath.suffix != '.json':
-                file_age = current_time - filepath.stat().st_mtime
-                if file_age > Config.CLEANUP_INTERVAL:
-                    try:
-                        filepath.unlink()
+            if filepath.is_file() and filepath.suffix != '.json' and filepath.name != 'youtube_cookies.txt':
+                try:
+                    file_age = current_time - filepath.stat().st_mtime
+                    if file_age > Config.CLEANUP_INTERVAL:
+                        filepath.unlink(missing_ok=True)
                         deleted_count += 1
-                    except Exception as e:
-                        logger.debug(f"Faylni o'chirishda xatolik: {e}")
+                except Exception as e:
+                    logger.debug(f"Faylni o'chirishda xatolik {filepath}: {e}")
         
         if deleted_count > 0:
             logger.info(f"🧹 {deleted_count} ta eski fayl o'chirildi")
@@ -254,8 +260,7 @@ def safe_delete(filepath: Optional[Union[str, Path]]) -> None:
         if filepath:
             path = Path(filepath)
             if path.exists() and path.is_file():
-                path.unlink()
-                logger.debug(f"🗑️ Fayl o'chirildi: {path.name}")
+                path.unlink(missing_ok=True)
     except Exception as e:
         logger.debug(f"Delete xatosi: {e}")
 
@@ -354,37 +359,44 @@ class CookieManager:
     """YouTube cookie manager"""
     
     @staticmethod
-    def find_browser_cookies() -> Optional[Path]:
-        """Browser cookie fayllarini qidirish"""
-        browsers = ['chrome', 'firefox', 'brave', 'edge', 'opera']
-        
-        for browser in browsers:
-            if browser in Config.BROWSER_PATHS:
-                for path_pattern in Config.BROWSER_PATHS[browser]:
-                    try:
-                        path = Path(path_pattern).expanduser()
-                        if path.exists():
-                            # Cookie fayllarini qidirish
-                            for cookie_file in path.rglob('Cookies'):
-                                if cookie_file.is_file():
-                                    logger.info(f"✅ {browser} cookie fayli topildi: {cookie_file}")
-                                    return cookie_file
-                    except Exception as e:
-                        logger.debug(f"{browser} cookie qidiruvi: {e}")
-        
-        return None
+    def create_dummy_cookies():
+        """Dummy cookie faylini yaratish (muvaqqat yechim)"""
+        try:
+            dummy_cookies = """# Netscape HTTP Cookie File
+.youtube.com	TRUE	/	TRUE	2147483647	VISITOR_INFO1_LIVE	dummy_value
+.youtube.com	TRUE	/	TRUE	2147483647	PREF	dummy_pref
+.youtube.com	TRUE	/	TRUE	2147483647	LOGIN_INFO	dummy_login
+"""
+            Config.COOKIES_FILE.write_text(dummy_cookies, encoding='utf-8')
+            logger.info("✅ Dummy cookie fayli yaratildi (muvaqqat yechim)")
+            state.cookies_available = True
+            return True
+        except Exception as e:
+            logger.error(f"❌ Dummy cookie yaratishda xatolik: {e}")
+            return False
     
     @staticmethod
     def extract_youtube_cookies() -> bool:
         """YouTube cookie'larini yt-dlp yordamida olish"""
         try:
-            # Birinchi urinish: browser'dan cookie olish
-            for browser in ['chrome', 'firefox', 'brave']:
+            logger.info("🔄 YouTube cookie'larini olish urinilmoqda...")
+            
+            # Avval dummy cookie yaratish
+            CookieManager.create_dummy_cookies()
+            
+            # Browser'dan cookie olishga urinish
+            browsers = ['chrome', 'firefox', 'brave', 'edge']
+            
+            for browser in browsers:
                 try:
+                    logger.info(f"🔍 {browser} browser'dan cookie qidirilmoqda...")
+                    
                     cmd = [
-                        'yt-dlp', '--cookies-from-browser', browser,
+                        'yt-dlp', 
+                        '--cookies-from-browser', browser,
                         '--cookies', str(Config.COOKIES_FILE),
                         '--skip-download',
+                        '--no-warnings',
                         'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
                     ]
                     
@@ -396,26 +408,35 @@ class CookieManager:
                         check=False
                     )
                     
-                    if result.returncode == 0 and Config.COOKIES_FILE.exists():
-                        content = Config.COOKIES_FILE.read_text(encoding='utf-8')
-                        if '.youtube.com' in content:
-                            logger.info(f"✅ YouTube cookie'lar {browser} dan muvaffaqiyatli olindi")
-                            state.cookies_available = True
-                            return True
+                    if result.returncode == 0:
+                        if Config.COOKIES_FILE.exists():
+                            content = Config.COOKIES_FILE.read_text(encoding='utf-8', errors='ignore')
+                            if '.youtube.com' in content:
+                                logger.info(f"✅ YouTube cookie'lar {browser} dan muvaffaqiyatli olindi")
+                                state.cookies_available = True
+                                return True
+                    
+                    logger.debug(f"{browser} dan cookie olinmadi: {result.stderr[:100]}")
+                    
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"⏱️ {browser} cookie olish timeout")
                 except Exception as e:
-                    logger.debug(f"{browser} cookie olish urinishi: {e}")
+                    logger.debug(f"{browser} cookie olish xatosi: {e}")
             
-            # Ikkinchi urinish: manual cookie export guide
+            # Agar hech qaysi browser'dan cookie olinmasa
             logger.warning("""
-            ⚠️ YouTube cookie'larini olish uchun quyidagi amallarni bajarishingiz kerak:
-            
-            1. Yangi inkognito oynada YouTube'ga kirishingiz
-            2. Faqat shu oynada https://www.youtube.com/robots.txt sahifasiga o'tishingiz
-            3. Browser extension (masalan, 'Get cookies.txt LOCALLY') yordamida cookie'larni eksport qilishingiz
-            4. Eksport qilingan faylni 'temp_files/youtube_cookies.txt' papkasiga joylashtirishingiz
-            
-            Bu YouTube'dan 'bot emasman' degan xatoni oldini olish uchun zarur.
-            """)
+⚠️ YouTube cookie'larini olish uchun qo'lda sozlash talab qilinadi:
+
+1. Yangi inkognito/private oyna oching
+2. YouTube'ga kirishingiz (login qilishingiz shart emas)
+3. https://www.youtube.com/robots.txt sahifasiga o'ting
+4. 'Get cookies.txt LOCALLY' kabi browser extension yordamida cookie'larni eksport qiling
+5. Eksport qilingan faylni quyidagi manzilga saqlang:
+   {}
+   
+YOKI quyidagi buyruqni ishga tushiring:
+yt-dlp --cookies-from-browser chrome --cookies {} --skip-download https://youtube.com
+            """.format(Config.COOKIES_FILE, Config.COOKIES_FILE))
             
             return False
             
@@ -440,10 +461,12 @@ class YDLConfig:
             'skip_unavailable_fragments': True,
             'continue_dl': True,
             'noprogress': True,
-            'concurrent_fragment_downloads': 4,
+            'concurrent_fragment_downloads': 3,
             'throttledratelimit': 1048576,
             'buffersize': 1048576,
             'http_chunk_size': 10485760,
+            'ignoreerrors': True,
+            'nooverwrites': True,
         }
         
         # Agar cookie mavjud bo'lsa, qo'shamiz
@@ -457,11 +480,10 @@ class YDLConfig:
         """YouTube uchun maxsus sozlamalar"""
         options = YDLConfig.get_base_options()
         options.update({
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',
-            'outtmpl': str(Config.TEMP_DIR / 'youtube_%(id)s_%(title)s.%(ext)s'),
+            'format': 'bestaudio/best',
+            'outtmpl': str(Config.TEMP_DIR / 'youtube_%(id)s.%(ext)s'),
             'restrictfilenames': True,
             'windowsfilenames': True,
-            'extractor_args': Config.YOUTUBE_EXTRACTOR_ARGS,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -474,14 +496,15 @@ class YDLConfig:
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Referer': 'https://www.youtube.com/',
                 'Origin': 'https://www.youtube.com',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin',
             },
-            'compat_opts': ['no-youtube-unavailable-videos'],
             'extract_flat': False,
-            'ignoreerrors': True,
-            'nooverwrites': True,
+            # YouTube extractor args
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'web', 'mweb', 'tv_embedded'],
+                    'player_skip': ['configs'],
+                }
+            },
         })
         return options
     
@@ -497,18 +520,6 @@ class YDLConfig:
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-            },
-            'extractor_args': {
-                'instagram': {
-                    'app_id': '936619743392459',
-                    'app_secret': 'f5d8c64e8b6e4c6b8b6e4c6b8b6e4c6b'
-                }
             },
         })
         return options
@@ -525,7 +536,6 @@ class YDLConfig:
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': 'https://www.tiktok.com/',
-                'Origin': 'https://www.tiktok.com',
             },
         })
         return options
@@ -556,11 +566,15 @@ class DownloadManager:
         """Qayta urinishlar bilan yuklash"""
         for attempt in range(Config.MAX_RETRIES):
             try:
-                logger.info(f"📥 Yuklash urinishi {attempt + 1}/{Config.MAX_RETRIES}: {url}")
+                logger.info(f"📥 {platform} yuklanmoqda (urinish {attempt + 1}/{Config.MAX_RETRIES})")
                 
                 with yt_dlp.YoutubeDL(options) as ydl:
                     # Info olish
                     info = ydl.extract_info(url, download=False)
+                    
+                    if not info:
+                        logger.error(f"❌ {platform} info olinmadi")
+                        continue
                     
                     # Agar video juda uzun bo'lsa
                     duration = info.get('duration', 0)
@@ -571,60 +585,69 @@ class DownloadManager:
                     # Yuklash
                     ydl.download([url])
                     
-                    # Yuklangan faylni topish
+                    # Video ID
                     video_id = info.get('id', 'unknown')
-                    files = list(Config.TEMP_DIR.glob(f'*{video_id}*'))
                     
-                    if files:
-                        file_path = files[0]
-                        file_size = file_path.stat().st_size
-                        
-                        if file_size > Config.MAX_FILE_SIZE:
-                            logger.warning(f"⚠️ Fayl juda katta: {format_size(file_size)}")
-                            safe_delete(file_path)
-                            return None
-                        
-                        logger.info(f"✅ Muvaffaqiyatli yuklandi: {file_path.name} ({format_size(file_size)})")
-                        return file_path
-                
-                # Agar fayl topilmasa, oxirgi o'zgartirilgan faylni topish
-                files = sorted(
-                    Config.TEMP_DIR.glob('*.*'),
-                    key=lambda f: f.stat().st_mtime,
-                    reverse=True
-                )
-                
-                if files and (time.time() - files[0].stat().st_mtime) < 60:
-                    return files[0]
+                    # Yuklangan faylni topish
+                    pattern = f"*{video_id}*" if video_id != 'unknown' else "*"
+                    files = list(Config.TEMP_DIR.glob(pattern))
                     
-            except yt_dlp.utils.DownloadError as e:
-                error_msg = str(e)
-                logger.error(f"❌ Yuklash xatosi (urinish {attempt + 1}): {error_msg}")
+                    # Oxirgi yaratilgan faylni topish
+                    if not files:
+                        files = sorted(
+                            Config.TEMP_DIR.glob('*.*'),
+                            key=lambda f: f.stat().st_mtime,
+                            reverse=True
+                        )
+                    
+                    for file_path in files:
+                        if file_path.is_file():
+                            file_size = file_path.stat().st_size
+                            
+                            if file_size > Config.MAX_FILE_SIZE:
+                                logger.warning(f"⚠️ Fayl juda katta: {format_size(file_size)}")
+                                safe_delete(file_path)
+                                continue
+                            
+                            if file_size > 1024:  # At least 1KB
+                                logger.info(f"✅ {platform} yuklandi: {file_path.name} ({format_size(file_size)})")
+                                return file_path
                 
-                # Agar cookie muammosi bo'lsa
-                if 'Sign in to confirm' in error_msg or 'PO Token' in error_msg:
-                    logger.warning("🔑 YouTube cookie muammosi. Cookie'ni yangilash kerak.")
-                    CookieManager.extract_youtube_cookies()
-                    # Cookie'ni yangilab qayta urinish
-                    options['cookiefile'] = str(Config.COOKIES_FILE)
-                    continue
-                
-                # Agar 429 xatosi bo'lsa (too many requests)
-                if '429' in error_msg or 'Too Many Requests' in error_msg:
-                    wait_time = (attempt + 1) * 5
-                    logger.warning(f"⏳ Ko'p so'rovlar. {wait_time} soniya kutish...")
-                    time.sleep(wait_time)
-                    continue
+                # Agar hali ham fayl topilmasa
+                logger.warning(f"⚠️ {platform} fayli topilmadi, urinish {attempt + 1}")
                 
                 if attempt < Config.MAX_RETRIES - 1:
                     wait_time = (attempt + 1) * Config.RATE_LIMIT_DELAY
                     logger.info(f"⏳ {wait_time} soniya kutib, qayta urinish...")
                     time.sleep(wait_time)
+                    
+            except yt_dlp.utils.DownloadError as e:
+                error_msg = str(e)
+                logger.error(f"❌ {platform} yuklash xatosi (urinish {attempt + 1}): {error_msg[:200]}")
+                
+                # Agar cookie muammosi bo'lsa
+                if 'Sign in to confirm' in error_msg or 'PO Token' in error_msg or 'bot' in error_msg.lower():
+                    logger.warning(f"🔑 {platform} cookie muammosi")
+                    if platform == 'youtube':
+                        # Dummy cookie yaratish
+                        CookieManager.create_dummy_cookies()
+                        options['cookiefile'] = str(Config.COOKIES_FILE)
+                
+                # Agar 429 xatosi bo'lsa (too many requests)
+                if '429' in error_msg or 'Too Many Requests' in error_msg:
+                    wait_time = (attempt + 1) * 10
+                    logger.warning(f"⏳ Ko'p so'rovlar. {wait_time} soniya kutish...")
+                    time.sleep(wait_time)
+                    continue
+                
+                if attempt < Config.MAX_RETRIES - 1:
+                    wait_time = (attempt + 1) * Config.RATE_LIMIT_DELAY * 2
+                    time.sleep(wait_time)
             
             except Exception as e:
-                logger.error(f"❌ Kutilmagan xatolik (urinish {attempt + 1}): {e}")
+                logger.error(f"❌ {platform} kutilmagan xatolik (urinish {attempt + 1}): {e}")
                 if attempt < Config.MAX_RETRIES - 1:
-                    time.sleep((attempt + 1) * 2)
+                    time.sleep((attempt + 1) * 3)
         
         return None
     
@@ -635,21 +658,31 @@ class DownloadManager:
             # Agar to'g'ridan-to'g'ri URL bo'lsa
             if is_youtube_url(query):
                 url = query
+                search_mode = False
             else:
                 # Qidiruv uchun URL
                 url = f"ytsearch1:{query}"
+                search_mode = True
             
             options = YDLConfig.get_youtube_options()
             
             # Agar title berilgan bo'lsa, fayl nomini o'zgartiramiz
-            if title:
+            if title and not search_mode:
                 clean_title = clean_filename(title)
                 options['outtmpl'] = str(Config.TEMP_DIR / f'audio_{clean_title}.%(ext)s')
             
-            return DownloadManager.download_with_retry(url, options, 'youtube')
+            result = DownloadManager.download_with_retry(url, options, 'youtube')
+            
+            # Agar search mode bo'lsa va natija bo'lmasa
+            if not result and search_mode:
+                # To'g'ridan-to'g'ri qidiruvni urinib ko'rish
+                options['format'] = 'best'
+                result = DownloadManager.download_with_retry(f"ytsearch:{query}", options, 'youtube')
+            
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Audio yuklash xatosi: {e}")
+            logger.error(f"❌ YouTube audio yuklash xatosi: {e}")
             return None
     
     @staticmethod
@@ -699,20 +732,14 @@ class MusicRecognizer:
             
             if result and 'track' in result:
                 track = result['track']
-                
-                # Serialize qilish
-                serialized = Serialize.full_track(result)
-                
                 return {
                     'found': True,
                     'title': track.get('title', 'Nomaʼlum'),
                     'artist': track.get('subtitle', 'Nomaʼlum'),
-                    'album': track.get('sections', [{}])[0].get('metadata', [{}])[0].get('text', ''),
+                    'album': track.get('sections', [{}])[0].get('metadata', [{}])[0].get('text', '') if track.get('sections') else '',
                     'year': track.get('year'),
                     'genre': track.get('genres', {}).get('primary', ''),
                     'label': track.get('label', ''),
-                    'isrc': track.get('isrc', ''),
-                    'serialized': serialized
                 }
         
         except Exception as e:
@@ -739,12 +766,21 @@ class MusicRecognizer:
                 asyncio.set_event_loop(loop)
             
             # Async funksiyani sync qilish
-            future = asyncio.ensure_future(
-                MusicRecognizer.recognize_audio_async(audio_bytes)
-            )
-            
-            result = loop.run_until_complete(future)
-            return result
+            if loop.is_running():
+                # Agar loop ishlayotgan bo'lsa, yangi threadda ishlatamiz
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        lambda: loop.run_until_complete(
+                            MusicRecognizer.recognize_audio_async(audio_bytes)
+                        )
+                    )
+                    return future.result(timeout=30)
+            else:
+                result = loop.run_until_complete(
+                    MusicRecognizer.recognize_audio_async(audio_bytes)
+                )
+                return result
             
         except Exception as e:
             logger.error(f"❌ Shazam sync xatosi: {e}")
@@ -790,7 +826,7 @@ class AudioProcessor:
             )
             
             if result.returncode != 0:
-                logger.error(f"❌ FFmpeg xatosi: {result.stderr}")
+                logger.error(f"❌ FFmpeg xatosi: {result.stderr[:200]}")
                 return None
             
             if audio_path.exists() and audio_path.stat().st_size > 1024:  # At least 1KB
@@ -806,56 +842,37 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"❌ Audio extraction xatosi: {e}")
             return None
-    
-    @staticmethod
-    def optimize_audio_for_telegram(audio_path: Path) -> Optional[Path]:
-        """Telegram uchun audio optimizatsiyasi"""
-        try:
-            if not audio_path.exists():
-                return None
-            
-            optimized_path = audio_path.parent / f"optimized_{audio_path.name}"
-            
-            command = [
-                'ffmpeg',
-                '-i', str(audio_path),
-                '-acodec', 'libmp3lame',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-ac', '2',
-                '-id3v2_version', '3',
-                '-write_id3v1', '1',
-                '-y',
-                str(optimized_path)
-            ]
-            
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False
-            )
-            
-            if result.returncode == 0 and optimized_path.exists():
-                # Asl faylni o'chirish
-                safe_delete(audio_path)
-                return optimized_path
-            
-            return audio_path  # Agar optimizatsiya ishlamasa, asl faylni qaytarish
-            
-        except Exception as e:
-            logger.error(f"❌ Audio optimizatsiya xatosi: {e}")
-            return audio_path
 
 # ==================== TELEGRAM BOT ====================
 class MusicBot:
     """Asosiy bot klassi"""
     
     def __init__(self):
-        self.bot = telebot.TeleBot(Config.BOT_TOKEN, parse_mode='HTML')
+        # Avval webhook'ni o'chirish
+        self._remove_webhook()
+        
+        # Botni yaratish
+        self.bot = telebot.TeleBot(
+            Config.BOT_TOKEN, 
+            parse_mode='HTML',
+            threaded=True,
+            num_threads=5,
+            skip_pending=True
+        )
+        
+        state.bot_instance = self.bot
         self.setup_handlers()
         self.running = False
+    
+    def _remove_webhook(self):
+        """Webhook'ni o'chirish"""
+        try:
+            temp_bot = telebot.TeleBot(Config.BOT_TOKEN)
+            temp_bot.remove_webhook()
+            logger.info("✅ Webhook o'chirildi")
+            time.sleep(1)
+        except Exception as e:
+            logger.warning(f"⚠️ Webhook o'chirishda xatolik: {e}")
     
     def setup_handlers(self):
         """Handlerlarni sozlash"""
@@ -923,13 +940,14 @@ class MusicBot:
 /cookie - Cookie sozlamalari
 
 <b>👨‍💻 Dasturchi:</b> @Rustamov_v1
-<b>📢 Kanal:</b> @Rustamov_Codes
 """
         
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("🎵 Qidiruv", callback_data="nav_search"),
             types.InlineKeyboardButton("📊 Stat", callback_data="nav_stats"),
+        )
+        markup.add(
             types.InlineKeyboardButton("🧹 Tozalash", callback_data="nav_clean"),
             types.InlineKeyboardButton("🔧 Cookie", callback_data="nav_cookie")
         )
@@ -964,16 +982,18 @@ class MusicBot:
     def handle_stats(self, message):
         """Statistika"""
         try:
+            temp_files = list(Config.TEMP_DIR.glob('*.*'))
+            temp_size = sum(f.stat().st_size for f in temp_files if f.is_file()) // 1024 // 1024
+            
             stats_text = f"""
 📊 <b>BOT STATISTIKASI</b>
 
 <b>👥 Foydalanuvchilar:</b> {len(state.user_sessions)}
-<b>📁 Vaqtinchalik fayllar:</b> {len(list(Config.TEMP_DIR.glob('*.*')))}
-<b>💾 Bo'sh joy:</b> {sum(f.stat().st_size for f in Config.TEMP_DIR.glob('*.*') if f.is_file()) // 1024 // 1024} MB
+<b>📁 Vaqtinchalik fayllar:</b> {len(temp_files)}
+<b>💾 Bo'sh joy:</b> {temp_size} MB
 <b>🔧 Cookie holati:</b> {'✅ Mavjud' if state.cookies_available else '❌ Yo\'q'}
 
 <b>⏰ Server vaqti:</b> {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-<b>🐍 Python versiyasi:</b> {sys.version.split()[0]}
 """
             
             self.bot.send_message(
@@ -1020,11 +1040,8 @@ Bot YouTube'dan muammosiz yuklay oladi.
 Cookie fayli topilmadi yoki ishlamayapti.
 YouTube'dan yuklashda muammolar bo'lishi mumkin.
 
-<b>Cookie'ni sozlash uchun:</b>
-1. Yangi inkognito oyna oching
-2. YouTube'ga kirib, robots.txt sahifasiga o'ting
-3. Cookie'larni eksport qiling
-4. 'temp_files/youtube_cookies.txt' fayliga saqlang
+<b>Cookie'ni sozlash uchun terminalda:</b>
+<code>yt-dlp --cookies-from-browser chrome --cookies temp_files/youtube_cookies.txt https://youtube.com</code>
 """
             
             markup = types.InlineKeyboardMarkup()
@@ -1049,8 +1066,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         if not state.check_rate_limit(message.chat.id):
             self.bot.reply_to(
                 message,
-                "⏳ <b>Iltimos, biroz kutib turing!</b>\n\n"
-                "Bir vaqtning o'zida faqat bitta audio qayta ishlanadi.",
+                "⏳ <b>Iltimos, biroz kutib turing!</b>",
                 parse_mode='HTML'
             )
             return
@@ -1124,17 +1140,15 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             audio_file_path = DownloadManager.download_youtube_audio(query, f"{artist} - {title}")
             
             if audio_file_path and audio_file_path.exists():
-                # Optimizatsiya
-                optimized_path = AudioProcessor.optimize_audio_for_telegram(audio_file_path)
-                
-                with open(optimized_path or audio_file_path, 'rb') as audio_file:
+                with open(audio_file_path, 'rb') as audio_file:
                     self.bot.send_audio(
                         message.chat.id,
                         audio_file,
                         title=title[:64],
                         performer=artist[:64],
                         caption=f"🎵 <b>{title}</b>\n👤 <b>{artist}</b>",
-                        parse_mode='HTML'
+                        parse_mode='HTML',
+                        timeout=60
                     )
                 
                 self.bot.delete_message(message.chat.id, status_msg.message_id)
@@ -1156,8 +1170,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             logger.error(f"❌ Telegram API xatosi: {e}")
             try:
                 self.bot.edit_message_text(
-                    "❌ <b>Telegram API xatosi</b>\n\n"
-                    "Iltimos, keyinroq qayta urinib ko'ring.",
+                    "❌ <b>Telegram API xatosi</b>",
                     message.chat.id,
                     status_msg.message_id,
                     parse_mode='HTML'
@@ -1169,8 +1182,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             logger.error(f"❌ Audio processing xatosi: {e}")
             try:
                 self.bot.edit_message_text(
-                    "❌ <b>Xatolik yuz berdi</b>\n\n"
-                    "Iltimos, keyinroq qayta urinib ko'ring.",
+                    "❌ <b>Xatolik yuz berdi</b>",
                     message.chat.id,
                     status_msg.message_id,
                     parse_mode='HTML'
@@ -1189,8 +1201,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         if not state.check_rate_limit(message.chat.id):
             self.bot.reply_to(
                 message,
-                "⏳ <b>Iltimos, biroz kutib turing!</b>\n\n"
-                "Bir vaqtning o'zida faqat bitta so'rov qayta ishlanadi.",
+                "⏳ <b>Iltimos, biroz kutib turing!</b>",
                 parse_mode='HTML'
             )
             return
@@ -1214,81 +1225,72 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         """Background URL processing"""
         status_msg = self.bot.reply_to(
             message,
-            f"⏳ <b>Yuklanmoqda...</b>\n\n"
-            f"📱 <b>Platforma:</b> {platform.capitalize()}",
+            f"⏳ <b>Yuklanmoqda...</b>",
             parse_mode='HTML'
         )
         
-        video_path = None
+        file_path = None
         
         try:
             # Platformaga qarab yuklash
             if platform == 'instagram':
-                video_path = DownloadManager.download_instagram(url)
+                file_path = DownloadManager.download_instagram(url)
             elif platform == 'tiktok':
-                video_path = DownloadManager.download_tiktok(url)
+                file_path = DownloadManager.download_tiktok(url)
             elif platform == 'youtube':
-                video_path = DownloadManager.download_youtube_audio(url)
+                file_path = DownloadManager.download_youtube_audio(url)
             
-            if video_path and video_path.exists():
+            if file_path and file_path.exists():
                 # Fayl hajmini tekshirish
-                file_size = video_path.stat().st_size
+                file_size = file_path.stat().st_size
                 
                 if file_size > Config.MAX_FILE_SIZE:
                     self.bot.edit_message_text(
                         f"❌ <b>Fayl juda katta!</b>\n\n"
                         f"📊 <b>Hajmi:</b> {format_size(file_size)}\n"
-                        f"📏 <b>Limit:</b> {format_size(Config.MAX_FILE_SIZE)}\n\n"
-                        f"Kichikroq video yuboring.",
+                        f"📏 <b>Limit:</b> {format_size(Config.MAX_FILE_SIZE)}",
                         message.chat.id,
                         status_msg.message_id,
                         parse_mode='HTML'
                     )
-                    safe_delete(video_path)
+                    safe_delete(file_path)
                     return
                 
-                # Video yuborish
-                with open(video_path, 'rb') as video_file:
+                # Fayl yuborish
+                with open(file_path, 'rb') as f:
                     if platform == 'youtube':
                         # Audio yuborish
                         self.bot.send_audio(
                             message.chat.id,
-                            video_file,
-                            caption=f"🎵 <b>YouTube Audio</b>\n"
-                                   f"🔗 <code>{url}</code>",
-                            parse_mode='HTML'
+                            f,
+                            caption=f"🎵 <b>YouTube Audio</b>",
+                            parse_mode='HTML',
+                            timeout=60
                         )
                     else:
                         # Video yuborish
                         self.bot.send_video(
                             message.chat.id,
-                            video_file,
-                            caption=f"📱 <b>{platform.capitalize()}</b>\n"
-                                   f"🔗 <code>{url}</code>",
+                            f,
+                            caption=f"📱 <b>{platform.capitalize()}</b>",
                             supports_streaming=True,
-                            parse_mode='HTML'
+                            timeout=60
                         )
                 
                 self.bot.delete_message(message.chat.id, status_msg.message_id)
-                logger.info(f"✅ {platform} yuborildi: {url}")
+                logger.info(f"✅ {platform} yuborildi")
                 
                 # Kechiktirilgan o'chirish
                 def delayed_delete():
                     time.sleep(30)
-                    safe_delete(video_path)
+                    safe_delete(file_path)
                 
                 threading.Thread(target=delayed_delete, daemon=True).start()
                 
             else:
                 self.bot.edit_message_text(
                     f"❌ <b>Yuklanmadi!</b>\n\n"
-                    f"📱 <b>Platforma:</b> {platform.capitalize()}\n"
-                    f"🔗 <b>URL:</b> <code>{url}</code>\n\n"
-                    f"Sabablar:\n"
-                    f"• Video mavjud emas\n"
-                    f"• Private video\n"
-                    f"• Platforma bloklagan\n"
-                    f"• Cookie muammosi (YouTube uchun)",
+                    f"Platforma: {platform.capitalize()}",
                     message.chat.id,
                     status_msg.message_id,
                     parse_mode='HTML'
@@ -1297,8 +1299,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         except Exception as e:
             logger.error(f"❌ URL processing xatosi: {e}")
             self.bot.edit_message_text(
-                "❌ <b>Xatolik yuz berdi</b>\n\n"
-                "Iltimos, keyinroq qayta urinib ko'ring.",
+                "❌ <b>Xatolik yuz berdi</b>",
                 message.chat.id,
                 status_msg.message_id,
                 parse_mode='HTML'
@@ -1306,8 +1307,8 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         
         finally:
             # Agar xatolik bo'lsa, darhol o'chirish
-            if video_path and not video_path.exists():
-                safe_delete(video_path)
+            if file_path and file_path.exists():
+                safe_delete(file_path)
     
     def process_search(self, chat_id: int, query: str, message_id: Optional[int] = None):
         """Qidiruvni qayta ishlash"""
@@ -1337,13 +1338,12 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             # Qidiruv
             with yt_dlp.YoutubeDL(YDLConfig.get_search_options()) as ydl:
                 try:
-                    info = ydl.extract_info(f"ytsearch50:{query}", download=False)
+                    info = ydl.extract_info(f"ytsearch30:{query}", download=False)
                     songs = info.get('entries', [])
                 except Exception as e:
                     logger.error(f"❌ Qidiruv xatosi: {e}")
                     self.bot.edit_message_text(
-                        "❌ <b>Qidiruvda xatolik</b>\n\n"
-                        "Iltimos, keyinroq qayta urinib ko'ring.",
+                        "❌ <b>Qidiruvda xatolik</b>",
                         chat_id,
                         status_msg.message_id,
                         parse_mode='HTML'
@@ -1352,8 +1352,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             
             if not songs:
                 self.bot.edit_message_text(
-                    "❌ <b>Hech narsa topilmadi</b>\n\n"
-                    "Boshqa nom bilan qidiring yoki to'g'ridan-to'g'ri YouTube linkini yuboring.",
+                    "❌ <b>Hech narsa topilmadi</b>",
                     chat_id,
                     status_msg.message_id,
                     parse_mode='HTML'
@@ -1378,8 +1377,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             try:
                 self.bot.send_message(
                     chat_id,
-                    "❌ <b>Qidiruvda xatolik</b>\n\n"
-                    "Iltimos, keyinroq qayta urinib ko'ring.",
+                    "❌ <b>Qidiruvda xatolik</b>",
                     parse_mode='HTML'
                 )
             except:
@@ -1391,8 +1389,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         if not session:
             self.bot.send_message(
                 chat_id,
-                "❌ <b>Sessiya muddati tugagan</b>\n\n"
-                "Yangi qidiruv bering.",
+                "❌ <b>Sessiya muddati tugagan</b>",
                 parse_mode='HTML'
             )
             return
@@ -1488,8 +1485,6 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
                 self.handle_download_callback(call)
             elif call.data.startswith('page_'):
                 self.handle_page_callback(call)
-            elif call.data.startswith('music_'):
-                self.handle_music_callback(call)
             elif call.data.startswith('nav_'):
                 self.handle_navigation_callback(call)
             elif call.data == 'close_page':
@@ -1500,7 +1495,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         except Exception as e:
             logger.error(f"❌ Callback handler xatosi: {e}")
             try:
-                self.bot.answer_callback_query(call.id, "❌ Xatolik yuz berdi", show_alert=True)
+                self.bot.answer_callback_query(call.id, "❌ Xatolik")
             except:
                 pass
     
@@ -1542,16 +1537,14 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             audio_file_path = DownloadManager.download_youtube_audio(url, title)
             
             if audio_file_path and audio_file_path.exists():
-                # Optimizatsiya
-                optimized_path = AudioProcessor.optimize_audio_for_telegram(audio_file_path)
-                
-                with open(optimized_path or audio_file_path, 'rb') as audio_file:
+                with open(audio_file_path, 'rb') as audio_file:
                     self.bot.send_audio(
                         call.message.chat.id,
                         audio_file,
                         title=title[:64],
                         caption=f"✅ <b>{title}</b>",
-                        parse_mode='HTML'
+                        parse_mode='HTML',
+                        timeout=60
                     )
                 
                 logger.info(f"✅ Yuklandi: {title}")
@@ -1559,8 +1552,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             else:
                 self.bot.send_message(
                     call.message.chat.id,
-                    f"❌ <b>Yuklanmadi:</b> {title}\n\n"
-                    "Iltimos, keyinroq qayta urinib ko'ring.",
+                    f"❌ <b>Yuklanmadi:</b> {title}",
                     parse_mode='HTML'
                 )
             
@@ -1570,8 +1562,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             logger.error(f"❌ Download callback xatosi: {e}")
             self.bot.send_message(
                 call.message.chat.id,
-                "❌ <b>Yuklashda xatolik</b>\n\n"
-                "Iltimos, keyinroq qayta urinib ko'ring.",
+                "❌ <b>Yuklashda xatolik</b>",
                 parse_mode='HTML'
             )
         
@@ -1587,20 +1578,6 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
             self.bot.answer_callback_query(call.id)
         except Exception as e:
             logger.error(f"❌ Page callback xatosi: {e}")
-    
-    def handle_music_callback(self, call):
-        """Musiqa aniqlash callback"""
-        # Bu funksiya videodan musiqa aniqlash uchun
-        btn_hash = call.data.split('_')[1]
-        self.bot.answer_callback_query(call.id, "🎵 Musiqa aniqlanmoqda...")
-        
-        # Implementatsiyani keyinroq qo'shing
-        self.bot.send_message(
-            call.message.chat.id,
-            "⚠️ <b>Bu funksiya hozircha ishlamayapti</b>\n\n"
-            "Tez orada qo'shiladi.",
-            parse_mode='HTML'
-        )
     
     def handle_navigation_callback(self, call):
         """Navigation callback"""
@@ -1644,20 +1621,15 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         if success:
             self.bot.send_message(
                 call.message.chat.id,
-                "✅ <b>Cookie muvaffaqiyatli yangilandi!</b>\n\n"
-                "Endi YouTube'dan muammosiz yuklay olasiz.",
+                "✅ <b>Cookie muvaffaqiyatli yangilandi!</b>",
                 parse_mode='HTML'
             )
         else:
             self.bot.send_message(
                 call.message.chat.id,
                 "❌ <b>Cookie yangilanmadi</b>\n\n"
-                "Qo'lda sozlash talab qilinadi.\n\n"
-                "1. Inkognito oyna oching\n"
-                "2. YouTube'ga kiring\n"
-                "3. robots.txt sahifasiga o'ting\n"
-                "4. Cookie'larni eksport qiling\n"
-                "5. temp_files/youtube_cookies.txt ga saqlang",
+                "Terminalda quyidagi buyruqni ishga tushiring:\n"
+                "<code>yt-dlp --cookies-from-browser chrome --cookies temp_files/youtube_cookies.txt https://youtube.com</code>",
                 parse_mode='HTML'
             )
     
@@ -1674,10 +1646,10 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         # Boshlang'ich tozalash
         cleanup_old_files()
         
-        # Cookie'ni tekshirish
+        # Cookie'ni tekshirish va yaratish
         if not state.cookies_available:
-            logger.warning("⚠️ YouTube cookie fayli topilmadi")
-            CookieManager.extract_youtube_cookies()
+            logger.warning("⚠️ YouTube cookie fayli topilmadi, dummy cookie yaratilmoqda...")
+            CookieManager.create_dummy_cookies()
         
         # Davriy tozalashni ishga tushirish
         self._start_periodic_tasks()
@@ -1686,33 +1658,56 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         logger.info("🚀 Bot ishga tushmoqda...")
         
         try:
-            self.bot.infinity_polling(
+            # Stop polling avvalgi instancelarni to'xtatish
+            try:
+                self.bot.stop_polling()
+                time.sleep(2)
+            except:
+                pass
+            
+            # Yangi polling
+            self.bot.polling(
+                none_stop=True,
+                interval=1,
                 timeout=30,
                 long_polling_timeout=30,
                 logger_level=logging.WARNING,
-                skip_pending=True
+                allowed_updates=None,
+                restart_on_change=False
             )
+            
         except KeyboardInterrupt:
             logger.info("\n🛑 Bot to'xtatilmoqda...")
             self.stop()
         except Exception as e:
             logger.error(f"❌ Bot ishga tushirishda xatolik: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             self.stop()
     
     def stop(self):
         """Botni to'xtatish"""
         self.running = False
         
-        # Sessionlarni saqlash
-        state.save_sessions()
+        try:
+            # Sessionlarni saqlash
+            state.save_sessions()
+            
+            # Botni to'xtatish
+            if self.bot:
+                try:
+                    self.bot.stop_polling()
+                except:
+                    pass
+            
+            # Executor'ni to'xtatish
+            if state.executor:
+                state.executor.shutdown(wait=False)
+            
+            logger.info("✅ Bot to'xtatildi")
+            
+        except Exception as e:
+            logger.error(f"❌ Stop xatosi: {e}")
         
-        # Executor'ni to'xtatish
-        state.executor.shutdown(wait=False)
-        
-        # Vaqtinchalik fayllarni tozalash
-        cleanup_old_files()
-        
-        logger.info("✅ Bot to'xtatildi")
         sys.exit(0)
     
     def _start_periodic_tasks(self):
@@ -1729,7 +1724,7 @@ YouTube'dan yuklashda muammolar bo'lishi mumkin.
         def save_sessions_task():
             while self.running:
                 try:
-                    time.sleep(60)  # Har 1 daqiqa
+                    time.sleep(60)
                     state.save_sessions()
                 except Exception as e:
                     logger.error(f"❌ Save sessions task xatosi: {e}")
@@ -1746,12 +1741,27 @@ def main():
     
     # Banner
     print("\n" + "="*60)
-    print("🎵 TELEGRAM MUSIC BOT 2026 - Ultimate Version")
+    print("🎵 TELEGRAM MUSIC BOT 2026 - Fixed Version")
     print("="*60)
-    print(f"🐍 Python: {sys.version.split()[0]}")
-    print(f"📦 yt-dlp: {version('yt-dlp') if YTDLP_AVAILABLE else 'N/A'}")
-    print(f"🤖 Telebot: {version('pyTelegramBotAPI') if TELEBOT_AVAILABLE else 'N/A'}")
-    print(f"🎶 Shazam: {version('shazamio') if SHAZAM_AVAILABLE else 'N/A'}")
+    
+    try:
+        py_version = sys.version.split()[0]
+        print(f"🐍 Python: {py_version}")
+    except:
+        print(f"🐍 Python: {sys.version}")
+    
+    try:
+        ytdlp_version = version('yt-dlp')
+        print(f"📦 yt-dlp: {ytdlp_version}")
+    except PackageNotFoundError:
+        print("📦 yt-dlp: N/A")
+    
+    try:
+        telebot_version = version('pyTelegramBotAPI')
+        print(f"🤖 Telebot: {telebot_version}")
+    except PackageNotFoundError:
+        print("🤖 Telebot: N/A")
+    
     print("="*60)
     print("✅ Bot ishga tushmoqda...")
     print("⚡ Tez, barqaror va mukammal")
@@ -1774,8 +1784,11 @@ def main():
         bot.start()
     except Exception as e:
         logger.error(f"❌ Fatal xatolik: {e}")
-        logger.info("🔄 5 soniyadan keyin qayta ishga tushiriladi...")
-        time.sleep(5)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        # 10 soniya kutib qayta urinish
+        logger.info("🔄 10 soniyadan keyin qayta ishga tushiriladi...")
+        time.sleep(10)
         
         # Qayta urinish
         try:
