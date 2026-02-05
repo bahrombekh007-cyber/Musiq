@@ -17,9 +17,7 @@ import signal
 import logging
 from importlib.metadata import version
 from pathlib import Path
-from typing import Optional, Dict, List
-
-# Python 3.11.0+ imports
+from typing import Optional, Dict, List, Union
 from datetime import datetime
 
 # Telegram Bot
@@ -36,7 +34,7 @@ import yt_dlp
 # ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
     ]
@@ -158,7 +156,7 @@ def cleanup_old_files() -> None:
     except Exception as e:
         logger.error(f"Cleanup xatosi: {e}")
 
-def safe_delete(filepath: Optional[str | Path]) -> None:
+def safe_delete(filepath: Optional[Union[str, Path]]) -> None:
     """Faylni xavfsiz o'chirish"""
     try:
         if filepath:
@@ -184,7 +182,7 @@ def clean_filename(text: str) -> str:
     
     return text.strip('_') or "audio"
 
-def format_duration(seconds: Optional[int | float]) -> str:
+def format_duration(seconds: Optional[Union[int, float]]) -> str:
     """Vaqtni formatlash (MM:SS)"""
     try:
         total_seconds = int(float(seconds))
@@ -263,18 +261,61 @@ def recognize_audio(audio_bytes: bytes) -> Dict:
 
 # ==================== DOWNLOAD FUNCTIONS ====================
 def download_youtube_audio(query: str, filename_hint: str = "") -> Optional[Path]:
-    """YouTube'dan audio yuklash"""
+    """YouTube'dan audio yuklash (yaxshilangan)"""
     try:
         clean_name = clean_filename(filename_hint or query)
-        output_path = TEMP_DIR / f"audio_{clean_name}.mp3"
         
-        options = AUDIO_OPTIONS.copy()
-        options['outtmpl'] = str(TEMP_DIR / f"audio_{clean_name}.%(ext)s")
+        # Yangi, kengaytirilgan sozlamalar
+        options = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'bestaudio/best',
+            'outtmpl': str(TEMP_DIR / f"audio_{clean_name}.%(ext)s"),
+            'restrictfilenames': True,
+            'windowsfilenames': True,
+            'socket_timeout': 30,
+            'retries': 10,
+            'fragment_retries': 10,
+            'nocheckcertificate': True,
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'prefer_insecure': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['configs', 'webpage'],
+                }
+            },
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+                'Referer': 'https://www.youtube.com/',
+            },
+            'cookiefile': None,
+        }
         
         with yt_dlp.YoutubeDL(options) as ydl:
-            ydl.download([f"ytsearch1:{query}"])
+            try:
+                # Birinchi urinish: to'g'ridan-to'g'ri qidiruv
+                ydl.download([f"ytsearch1:{query}"])
+            except yt_dlp.utils.DownloadError as e:
+                logger.warning(f"Birinchilab urinish xatosi: {e}")
+                
+                # Ikkinchi urinish: extractor_args bilan
+                options['extractor_args']['youtube']['player_client'] = ['ios']
+                with yt_dlp.YoutubeDL(options) as ydl2:
+                    ydl2.download([f"ytsearch1:{query}"])
         
-        # Yuklanganini tekshirish
+        # Yuklangan faylni topish
+        output_path = TEMP_DIR / f"audio_{clean_name}.mp3"
+        
         if output_path.exists():
             return output_path
         
@@ -288,12 +329,15 @@ def download_youtube_audio(query: str, filename_hint: str = "") -> Optional[Path
         if mp3_files and (time.time() - mp3_files[0].stat().st_mtime) < 120:
             return mp3_files[0]
         
+        # Agar hali ham topilmasa
+        return None
+        
     except Exception as e:
         logger.error(f"Audio yuklash xatosi: {e}")
     
     return None
 
-def extract_audio_from_video(video_path: str | Path, duration: int = 10) -> Optional[Path]:
+def extract_audio_from_video(video_path: Union[str, Path], duration: int = 10) -> Optional[Path]:
     """Videodan audio ajratish (FFmpeg)"""
     try:
         video_path = Path(video_path)
@@ -363,7 +407,10 @@ def handle_audio_message(message: types.Message) -> None:
         status_msg = bot.reply_to(message, "🎵 Musiqa aniqlanmoqda...")
         
         # File ID olish
-        file_id = message.audio.file_id if message.audio else message.voice.file_id
+        if message.audio:
+            file_id = message.audio.file_id
+        else:
+            file_id = message.voice.file_id
         
         # File yuklab olish
         file_info = bot.get_file(file_id)
@@ -449,7 +496,7 @@ def handle_instagram(message: types.Message) -> None:
     
     try:
         url = message.text.strip().split('?')[0]
-        status_msg = bot.reply_to(message, "⏳")
+        status_msg = bot.reply_to(message, "⏳ Instagram yuklanmoqda...")
         
         logger.info(f"Instagram URL: {url}")
         
@@ -495,7 +542,7 @@ def handle_instagram(message: types.Message) -> None:
         
         if not video_files:
             bot.edit_message_text(
-                "❌ Video yuklanmadi\n\n"
+                "❌ Instagram video yuklanmadi\n\n"
                 "Sabablar:\n"
                 "• Link noto'g'ri\n"
                 "• Video private\n"
@@ -593,6 +640,7 @@ def handle_instagram(message: types.Message) -> None:
             
             import threading
             threading.Thread(target=delayed_delete, daemon=True).start()
+
 # ==================== TIKTOK HANDLER ====================
 @bot.message_handler(func=lambda m: m.text and is_tiktok_url(m.text))
 def handle_tiktok(message: types.Message) -> None:
@@ -824,19 +872,52 @@ def handle_video_music_recognition(call: types.CallbackQuery) -> None:
 # ==================== SEARCH HANDLER ====================
 @bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
 def handle_search(message: types.Message) -> None:
-    """Qidiruv handler"""
+    """Qidiruv handler (yaxshilangan)"""
     status_msg = None
     
     try:
         query = message.text.strip()
+        
+        # Fayl tozalash
+        cleanup_old_files()
+        
         status_msg = bot.reply_to(message, f"🔍 '{query}' qidirilmoqda...")
         
         logger.info(f"Qidiruv: {query}")
         
-        # YouTube qidiruv - 50 ta qidirish
-        with yt_dlp.YoutubeDL(SEARCH_OPTIONS) as ydl:
-            info = ydl.extract_info(f"ytsearch50:{query}", download=False)
-            songs = info.get('entries', [])
+        # Yangi yt-dlp sozlamalari bilan qidiruv
+        search_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'socket_timeout': 30,
+            'retries': 5,
+            'fragment_retries': 5,
+            'nocheckcertificate': True,
+            'geo_bypass': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                }
+            },
+        }
+        
+        with yt_dlp.YoutubeDL(search_opts) as ydl:
+            try:
+                info = ydl.extract_info(f"ytsearch30:{query}", download=False)
+                songs = info.get('entries', [])
+            except Exception as e:
+                logger.warning(f"Qidiruv xatosi, qayta urinilmoqda: {e}")
+                # Qayta urinish: boshqa user agent bilan
+                search_opts['http_headers']['User-Agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
+                with yt_dlp.YoutubeDL(search_opts) as ydl2:
+                    info = ydl2.extract_info(f"ytsearch30:{query}", download=False)
+                    songs = info.get('entries', [])
         
         if not songs:
             bot.edit_message_text(
@@ -850,7 +931,7 @@ def handle_search(message: types.Message) -> None:
         user_sessions[message.chat.id] = {
             'query': query,
             'songs': songs,
-            'page': 0,  # Sahifa raqami
+            'page': 0,
             'timestamp': datetime.now()
         }
         
@@ -862,7 +943,7 @@ def handle_search(message: types.Message) -> None:
         logger.error(f"Qidiruv xatosi: {e}")
         if status_msg:
             bot.edit_message_text(
-                "❌ Qidiruvda xatolik",
+                "❌ Qidiruvda xatolik\n\nQayta urinib ko'ring",
                 message.chat.id,
                 status_msg.message_id
             )
@@ -1075,12 +1156,11 @@ def handle_navigation(call: types.CallbackQuery) -> None:
             "🔍 Yangi qidiruv uchun qo'shiq yoki ijrochi nomini yozing:"
         )
 
-# ==================== ERROR HANDLER ====================
-@bot.message_handler(func=lambda message: True, content_types=['text'])
+# ==================== UNKNOWN MESSAGES ====================
+@bot.message_handler(func=lambda message: True)
 def handle_unknown(message: types.Message) -> None:
     """Noma'lum xabarlar uchun"""
-    if not message.text.startswith('/'):
-        # Qidiruv sifatida qayta ishlash
+    if message.content_type == 'text' and not message.text.startswith('/'):
         handle_search(message)
 
 # ==================== SHUTDOWN HANDLER ====================
@@ -1125,7 +1205,10 @@ def main() -> None:
     logger.info("🎵 TELEGRAM MUSIC BOT")
     logger.info("=" * 60)
     logger.info(f"🐍 Python: {sys.version.split()[0]}")
-    logger.info(f"📦 pyTelegramBotAPI: {version('pyTelegramBotAPI')}")
+    try:
+        logger.info(f"📦 pyTelegramBotAPI: {version('pyTelegramBotAPI')}")
+    except:
+        logger.info("📦 pyTelegramBotAPI: Not found")
     logger.info(f"📁 Temp katalog: {TEMP_DIR.absolute()}")
     logger.info("=" * 60)
     logger.info("✅ Bot ishga tushdi!")
