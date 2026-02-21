@@ -1182,8 +1182,8 @@ def start(message):
     conn.close()
     
     # Railway URL ni olish (HTTPS)
-    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
-    if railway_url:
+    railway_url = os.environ.get('webhook-processor-production-6f0b.up.railway.app')
+if railway_url:
         webapp_url = f"https://{railway_url}/user/{user_id}"
     else:
         # Local ishlatish uchun
@@ -1233,7 +1233,7 @@ def health():
 # Main
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+    railway_url = os.environ.get('webhook-processor-production-6f0b.up.railway.app')
     
     if railway_url:
         # Webhook o'rnatish (polling emas)
