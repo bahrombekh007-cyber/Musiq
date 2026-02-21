@@ -5,14 +5,13 @@ import sqlite3
 from datetime import datetime, timedelta
 import logging
 from flask import Flask, request, render_template_string, jsonify
-import threading
 import time
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Bot token - Railwayda environment variable orqali beriladi
+# Bot token - Railwayda environment variable
 BOT_TOKEN = os.environ.get('BOT_TOKEN', "8418511713:AAFkb9zPXNqdwaw4sb3AmjSLQkTKeBXRMVM")
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -29,14 +28,12 @@ def init_database():
     conn = get_db()
     c = conn.cursor()
     
-    # Users table
     c.execute('''CREATE TABLE IF NOT EXISTS users
                 (user_id INTEGER PRIMARY KEY,
                  username TEXT,
                  first_name TEXT,
                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Transactions table
     c.execute('''CREATE TABLE IF NOT EXISTS transactions
                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
                  user_id INTEGER,
@@ -46,7 +43,6 @@ def init_database():
                  type TEXT,
                  date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Categories table
     c.execute('''CREATE TABLE IF NOT EXISTS categories
                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
                  user_id INTEGER,
@@ -58,7 +54,6 @@ def init_database():
     conn.close()
     logger.info("Database initialized")
 
-# Initialize database
 init_database()
 
 # HTML Templates
@@ -102,18 +97,6 @@ MAIN_HTML = '''
             to { opacity: 1; transform: translateY(0); }
         }
         
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 20px;
-        }
-        
-        .header h1 {
-            font-size: 24px;
-            color: #333;
-        }
-        
         .balance-card {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -146,11 +129,6 @@ MAIN_HTML = '''
         .stat-value {
             font-size: 18px;
             font-weight: bold;
-        }
-        
-        .stat-label {
-            font-size: 12px;
-            opacity: 0.8;
         }
         
         .menu-grid {
@@ -264,24 +242,17 @@ MAIN_HTML = '''
 </head>
 <body>
     <div class="container">
-        <div class="card">
-            <div class="header">
-                <h1>💰 Moliya Hisobchisi</h1>
-                <span>User: {{ user_id }}</span>
-            </div>
-        </div>
-        
         <div class="balance-card">
             <div class="balance-label">Jami balans</div>
             <div class="balance-amount">{{ "{:,.0f}".format(balance) }} so'm</div>
             <div class="balance-stats">
                 <div class="stat-item">
-                    <div class="stat-value text-success">+{{ "{:,.0f}".format(today_income) }}</div>
-                    <div class="stat-label">Bugungi daromad</div>
+                    <div class="stat-value" style="color: #a5d6a5;">+{{ "{:,.0f}".format(today_income) }}</div>
+                    <div class="balance-label">Bugungi daromad</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-value text-danger">-{{ "{:,.0f}".format(today_expense) }}</div>
-                    <div class="stat-label">Bugungi xarajat</div>
+                    <div class="stat-value" style="color: #ffb3b3;">-{{ "{:,.0f}".format(today_expense) }}</div>
+                    <div class="balance-label">Bugungi xarajat</div>
                 </div>
             </div>
         </div>
@@ -324,10 +295,6 @@ MAIN_HTML = '''
                 {% endfor %}
             </div>
         </div>
-        
-        <button class="btn btn-primary" onclick="location.href='/'">
-            🔄 Yangilash
-        </button>
     </div>
 </body>
 </html>
@@ -374,7 +341,7 @@ ADD_HTML = '''
         
         h1 {
             color: #333;
-            margin-bottom: 20px;
+            margin-bottom: 30px;
             display: flex;
             align-items: center;
             gap: 10px;
@@ -450,17 +417,6 @@ ADD_HTML = '''
             margin-bottom: 20px;
             text-align: center;
         }
-        
-        .back-btn {
-            margin-top: 20px;
-            text-align: center;
-        }
-        
-        .back-btn a {
-            color: white;
-            text-decoration: none;
-            font-size: 14px;
-        }
     </style>
 </head>
 <body>
@@ -499,10 +455,6 @@ ADD_HTML = '''
                     <button type="button" class="btn btn-secondary" onclick="location.href='/user/{{ user_id }}'">❌ Bekor qilish</button>
                 </div>
             </form>
-        </div>
-        
-        <div class="back-btn">
-            <a href="/user/{{ user_id }}">🔙 Orqaga qaytish</a>
         </div>
     </div>
 </body>
@@ -571,6 +523,7 @@ HISTORY_HTML = '''
             cursor: pointer;
             font-weight: 600;
             transition: all 0.3s;
+            background: #f0f0f0;
         }
         
         .filter-btn.active {
@@ -637,6 +590,7 @@ HISTORY_HTML = '''
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             width: 100%;
+            margin-top: 20px;
         }
         
         .btn:hover {
@@ -651,9 +605,9 @@ HISTORY_HTML = '''
             <h1>📜 Operatsiyalar tarixi</h1>
             
             <div class="filter-buttons">
-                <button class="filter-btn" onclick="filterTransactions('all')">Hammasi</button>
-                <button class="filter-btn" onclick="filterTransactions('income')">Daromad</button>
-                <button class="filter-btn" onclick="filterTransactions('expense')">Xarajat</button>
+                <button class="filter-btn active" onclick="filterTransactions('all', this)">Hammasi</button>
+                <button class="filter-btn" onclick="filterTransactions('income', this)">Daromad</button>
+                <button class="filter-btn" onclick="filterTransactions('expense', this)">Xarajat</button>
             </div>
             
             <div id="transactions-list">
@@ -673,19 +627,19 @@ HISTORY_HTML = '''
                 {% endfor %}
             </div>
             
-            <button class="btn" style="margin-top: 20px;" onclick="location.href='/user/{{ user_id }}'">
+            <button class="btn" onclick="location.href='/user/{{ user_id }}'">
                 🔙 Orqaga
             </button>
         </div>
     </div>
     
     <script>
-        function filterTransactions(type) {
+        function filterTransactions(type, btn) {
             const items = document.querySelectorAll('.transaction-item');
             const buttons = document.querySelectorAll('.filter-btn');
             
-            buttons.forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            buttons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
             
             items.forEach(item => {
                 if (type === 'all' || item.dataset.type === type) {
@@ -914,23 +868,22 @@ def get_user_data(user_id):
     conn = get_db()
     c = conn.cursor()
     
-    # Balance
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
     income = c.fetchone()[0] or 0
+    
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
     expense = c.fetchone()[0] or 0
     balance = income - expense
     
-    # Today
     today = datetime.now().strftime("%Y-%m-%d")
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income' AND date LIKE ?", 
              (user_id, f"{today}%"))
     today_income = c.fetchone()[0] or 0
+    
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense' AND date LIKE ?", 
              (user_id, f"{today}%"))
     today_expense = c.fetchone()[0] or 0
     
-    # Recent transactions
     c.execute('''SELECT amount, description, category, type, 
                 strftime('%d.%m.%Y %H:%M', date) as datetime 
                 FROM transactions WHERE user_id=? ORDER BY date DESC LIMIT 10''', (user_id,))
@@ -1006,6 +959,7 @@ def get_stats(user_id):
     
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
     total_income = c.fetchone()[0] or 0
+    
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
     total_expense = c.fetchone()[0] or 0
     
@@ -1050,6 +1004,8 @@ def home():
                 justify-content: center;
                 align-items: center;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                margin: 0;
+                padding: 20px;
             }
             .container {
                 background: white;
@@ -1058,27 +1014,56 @@ def home():
                 box-shadow: 0 20px 60px rgba(0,0,0,0.3);
                 text-align: center;
                 max-width: 400px;
+                width: 100%;
+                animation: slideUp 0.5s ease;
             }
-            h1 { color: #333; margin-bottom: 20px; }
+            @keyframes slideUp {
+                from { opacity: 0; transform: translateY(20px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            h1 { 
+                color: #333; 
+                margin-bottom: 30px;
+                font-size: 28px;
+            }
+            p {
+                color: #666;
+                margin-bottom: 20px;
+            }
             input { 
                 padding: 15px; 
                 width: 100%; 
                 margin-bottom: 20px;
                 border: 2px solid #e0e0e0;
-                border-radius: 10px;
+                border-radius: 12px;
                 font-size: 16px;
+                box-sizing: border-box;
+            }
+            input:focus {
+                outline: none;
+                border-color: #667eea;
             }
             button {
                 padding: 15px 30px;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
                 border: none;
-                border-radius: 10px;
+                border-radius: 12px;
                 font-size: 16px;
+                font-weight: 600;
                 cursor: pointer;
                 width: 100%;
+                transition: transform 0.3s;
             }
-            button:hover { transform: translateY(-2px); }
+            button:hover { 
+                transform: translateY(-2px);
+                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+            }
+            .info {
+                margin-top: 20px;
+                color: #999;
+                font-size: 12px;
+            }
         </style>
     </head>
     <body>
@@ -1087,12 +1072,17 @@ def home():
             <p>Telegram ID-ingizni kiriting:</p>
             <input type="number" id="userId" placeholder="Masalan: 123456789">
             <button onclick="goToUser()">Kirish</button>
+            <div class="info">
+                Telegram ID ni @userinfobot dan olishingiz mumkin
+            </div>
         </div>
         <script>
             function goToUser() {
                 const userId = document.getElementById('userId').value;
                 if (userId) {
                     window.location.href = '/user/' + userId;
+                } else {
+                    alert('Iltimos, Telegram ID kiriting!');
                 }
             }
         </script>
@@ -1191,12 +1181,13 @@ def start(message):
     conn.commit()
     conn.close()
     
-    # Get railway URL
-    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'webhook-processor-production-6f0b.up.railway.app')
-    if not railway_url:
-        railway_url = request.host_url.rstrip('/') if request else ''
-    
-    webapp_url = f"{railway_url}/user/{user_id}"
+    # Railway URL ni olish (HTTPS)
+    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+    if railway_url:
+        webapp_url = f"https://{railway_url}/user/{user_id}"
+    else:
+        # Local ishlatish uchun
+        webapp_url = f"https://your-domain.com/user/{user_id}"
     
     markup = types.InlineKeyboardMarkup()
     web_app = types.WebAppInfo(url=webapp_url)
@@ -1216,72 +1207,48 @@ def help_command(message):
     help_text = """
 ❓ Yordam
 
-💰 Daromad qo'shish: /income
-💸 Xarajat qo'shish: /expense
-📊 Balans: /balance
-📜 Tarix: /history
-📈 Statistika: /stats
+💰 Daromad qo'shish: Web App dan foydalaning
+💸 Xarajat qo'shish: Web App dan foydalaning
+📊 Balans ko'rish: Web App dan foydalaning
+📜 Tarix: Web App dan foydalaning
+📈 Statistika: Web App dan foydalaning
 
-Yoki Web App dan foydalaning!
+🌐 Web App: /start tugmasini bosing
     """
     bot.send_message(message.chat.id, help_text)
 
-@bot.message_handler(commands=['balance'])
-def balance_command(message):
-    user_id = message.from_user.id
-    balance, income, expense = get_user_data(user_id)[:3]
-    today_income, today_expense = get_user_data(user_id)[1:3]
-    
-    text = f"""
-💰 Balans: {balance:,.0f} so'm
-
-📊 Bugun:
-   ➕ {today_income:,.0f} so'm
-   ➖ {today_expense:,.0f} so'm
-
-📈 Jami:
-   ➕ {income:,.0f} so'm
-   ➖ {expense:,.0f} so'm
-    """
-    bot.send_message(message.chat.id, text)
-
-# Railway deploy uchun
-def run_bot():
-    while True:
-        try:
-            logger.info("Bot polling started...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            logger.error(f"Bot polling error: {e}")
-            time.sleep(10)
-
-# Flask route for health check
-@app.route('/health')
-def health():
-    return jsonify({"status": "ok"})
-
+# Webhook endpoint
 @app.route('/webhook', methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('UTF-8')
     update = telebot.types.Update.de_json(json_str)
     bot.process_new_updates([update])
-    return '!', 200
+    return 'OK', 200
+
+# Health check
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
 # Main
 if __name__ == '__main__':
-    # Setup webhook for production
-    railway_url = os.environ.get('webhook-processor-production-6f0b.up.railway.app')
+    port = int(os.environ.get('PORT', 5000))
+    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+    
     if railway_url:
+        # Webhook o'rnatish (polling emas)
         webhook_url = f"https://{railway_url}/webhook"
         bot.remove_webhook()
         time.sleep(1)
         bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set to {webhook_url}")
     else:
-        # Start bot thread for development
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
+        # Local development
+        logger.warning("No RAILWAY_PUBLIC_DOMAIN found, using polling")
+        import threading
+        def run_polling():
+            bot.infinity_polling()
+        threading.Thread(target=run_polling, daemon=True).start()
     
-    # Start Flask
-    port = int(os.environ.get('PORT', 5000))
+    # Flask serverni ishga tushirish
     app.run(host='0.0.0.0', port=port)
