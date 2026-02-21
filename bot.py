@@ -1,706 +1,1236 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import telebot
 from telebot import types
 import sqlite3
-from datetime import datetime, timedelta
-import logging
-import time
-from typing import Dict, List, Optional
+from datetime import datetime
+import json
+from flask import Flask, request, render_template_string, redirect, url_for
+import threading
 
-# Logging sozlamalari
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Bot tokeni (sizning tokeningiz)
+# Bot tokeni
 BOT_TOKEN = "8418511713:AAFkb9zPXNqdwaw4sb3AmjSLQkTKeBXRMVM"
-
-# Botni yaratish
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Foydalanuvchi holatlarini saqlash
-user_states = {}
+# Flask web app
+app = Flask(__name__)
 
-class FinanceBot:
-    def __init__(self):
-        self.init_database()
-    
-    def init_database(self):
-        """Ma'lumotlar bazasini yaratish"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+# HTML shablonlar
+WEB_APP_HTML = '''
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Moliya Hisobchisi</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
         
-        # Foydalanuvchilar jadvali
-        c.execute('''CREATE TABLE IF NOT EXISTS users
-                    (user_id INTEGER PRIMARY KEY,
-                     username TEXT,
-                     first_name TEXT,
-                     registered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
         
-        # Kategoriyalar jadvali
-        c.execute('''CREATE TABLE IF NOT EXISTS categories
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     user_id INTEGER,
-                     name TEXT,
-                     type TEXT,
-                     icon TEXT,
-                     FOREIGN KEY (user_id) REFERENCES users (user_id))''')
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
         
-        # Transaksiyalar jadvali
-        c.execute('''CREATE TABLE IF NOT EXISTS transactions
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     user_id INTEGER,
-                     amount REAL,
-                     description TEXT,
-                     category TEXT,
-                     type TEXT,
-                     date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                     FOREIGN KEY (user_id) REFERENCES users (user_id))''')
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            animation: slideUp 0.5s ease;
+        }
         
-        conn.commit()
-        conn.close()
-    
-    def register_user(self, user_id, username, first_name):
-        """Yangi foydalanuvchini ro'yxatdan o'tkazish"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
         
-        # Foydalanuvchini qo'shish
-        c.execute('''INSERT OR IGNORE INTO users (user_id, username, first_name)
-                    VALUES (?, ?, ?)''', (user_id, username, first_name))
+        h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
         
-        # Default kategoriyalar qo'shish
-        default_categories = [
-            (user_id, '💰 Ish haqi', 'income', '💼'),
-            (user_id, '💼 Bonus', 'income', '🎁'),
-            (user_id, '📱 Freelance', 'income', '💻'),
-            (user_id, '🎁 Sovg\'a', 'income', '🎀'),
-            (user_id, '🍽️ Ovqat', 'expense', '🍔'),
-            (user_id, '🚖 Transport', 'expense', '🚗'),
-            (user_id, '🛒 Kiyim', 'expense', '👕'),
-            (user_id, '🏠 Uy', 'expense', '🏡'),
-            (user_id, '📞 Telefon', 'expense', '📱'),
-            (user_id, '🎮 Ko\'ngilochar', 'expense', '🎮'),
-            (user_id, '🏥 Sog\'liq', 'expense', '💊'),
-            (user_id, '📚 Ta\'lim', 'expense', '📚')
-        ]
+        h2 {
+            color: #666;
+            font-size: 18px;
+            margin-bottom: 15px;
+        }
         
-        for cat in default_categories:
-            c.execute('''INSERT OR IGNORE INTO categories (user_id, name, type, icon)
-                        VALUES (?, ?, ?, ?)''', cat)
+        .balance-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
         
-        conn.commit()
-        conn.close()
-    
-    def get_categories(self, user_id, trans_type):
-        """Foydalanuvchi kategoriyalarini olish"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        c.execute('''SELECT name, icon FROM categories 
-                    WHERE user_id=? AND type=? 
-                    ORDER BY name''', (user_id, trans_type))
-        categories = c.fetchall()
-        conn.close()
-        return categories
-    
-    def add_transaction(self, user_id, amount, description, category, trans_type):
-        """Yangi transaksiya qo'shish"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        c.execute('''INSERT INTO transactions (user_id, amount, description, category, type)
-                    VALUES (?, ?, ?, ?, ?)''',
-                 (user_id, amount, description, category, trans_type))
-        conn.commit()
-        transaction_id = c.lastrowid
-        conn.close()
-        return transaction_id
-    
-    def get_balance(self, user_id):
-        """Foydalanuvchi balansini hisoblash"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        .balance-title {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-bottom: 10px;
+        }
         
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
-        income = c.fetchone()[0] or 0
+        .balance-amount {
+            font-size: 36px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
         
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
-        expense = c.fetchone()[0] or 0
+        .balance-stats {
+            display: flex;
+            justify-content: space-between;
+            font-size: 14px;
+        }
         
-        conn.close()
-        return income - expense, income, expense
-    
-    def get_today_stats(self, user_id):
-        """Bugungi statistika"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        .stat-item {
+            text-align: center;
+        }
         
-        today = datetime.now().strftime("%Y-%m-%d")
-        c.execute('''SELECT SUM(amount) FROM transactions 
-                    WHERE user_id=? AND type='income' AND date LIKE ?''', 
-                 (user_id, f"{today}%"))
-        today_income = c.fetchone()[0] or 0
+        .stat-value {
+            font-weight: bold;
+            font-size: 18px;
+        }
         
-        c.execute('''SELECT SUM(amount) FROM transactions 
-                    WHERE user_id=? AND type='expense' AND date LIKE ?''', 
-                 (user_id, f"{today}%"))
-        today_expense = c.fetchone()[0] or 0
+        .form-group {
+            margin-bottom: 20px;
+        }
         
-        conn.close()
-        return today_income, today_expense
-    
-    def get_today_transactions(self, user_id):
-        """Bugungi transaksiyalar"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
         
-        today = datetime.now().strftime("%Y-%m-%d")
-        c.execute('''SELECT amount, description, category, type, 
-                    strftime('%H:%M', date) as time 
-                    FROM transactions 
-                    WHERE user_id=? AND date LIKE ? 
-                    ORDER BY date DESC''', (user_id, f"{today}%"))
+        input, select, textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 16px;
+            transition: all 0.3s;
+        }
         
-        transactions = c.fetchall()
-        conn.close()
-        return transactions
-    
-    def get_history(self, user_id, limit=20):
-        """Oxirgi transaksiyalar"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
         
-        c.execute('''SELECT amount, description, category, type, 
-                    strftime('%d.%m.%Y %H:%M', date) as datetime 
-                    FROM transactions 
-                    WHERE user_id=? 
-                    ORDER BY date DESC 
-                    LIMIT ?''', (user_id, limit))
+        .btn {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
         
-        transactions = c.fetchall()
-        conn.close()
-        return transactions
-    
-    def get_stats(self, user_id):
-        """Statistika ma'lumotlari"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
         
-        # Kategoriyalar bo'yicha xarajatlar
-        c.execute('''SELECT category, SUM(amount), COUNT(*) 
-                    FROM transactions 
-                    WHERE user_id=? AND type='expense' 
-                    GROUP BY category 
-                    ORDER BY SUM(amount) DESC''', (user_id,))
-        expense_cats = c.fetchall()
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
         
-        # Oylik statistika
-        c.execute('''SELECT strftime('%Y-%m', date) as month,
-                           SUM(CASE WHEN type='income' THEN amount ELSE 0 END) as income,
-                           SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) as expense
-                    FROM transactions
-                    WHERE user_id=?
-                    GROUP BY month
-                    ORDER BY month DESC
-                    LIMIT 6''', (user_id,))
-        monthly_stats = c.fetchall()
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
         
-        conn.close()
-        return expense_cats, monthly_stats
-    
-    def delete_transaction(self, user_id, transaction_id):
-        """Transaksiyani o'chirish"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        c.execute('''DELETE FROM transactions 
-                    WHERE id=? AND user_id=?''', (transaction_id, user_id))
-        success = c.rowcount > 0
-        conn.commit()
-        conn.close()
-        return success
-    
-    def get_transactions_for_delete(self, user_id, limit=10):
-        """O'chirish uchun transaksiyalar ro'yxati"""
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
+        .btn-success:hover {
+            background: #218838;
+        }
         
-        c.execute('''SELECT id, amount, description, category, type, 
-                    strftime('%d.%m %H:%M', date) as datetime 
-                    FROM transactions 
-                    WHERE user_id=? 
-                    ORDER BY date DESC 
-                    LIMIT ?''', (user_id, limit))
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
         
-        transactions = c.fetchall()
-        conn.close()
-        return transactions
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn-group .btn {
+            flex: 1;
+        }
+        
+        .transaction-item {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-left: 4px solid;
+            transition: transform 0.2s;
+        }
+        
+        .transaction-item:hover {
+            transform: translateX(5px);
+        }
+        
+        .transaction-income {
+            border-left-color: #28a745;
+        }
+        
+        .transaction-expense {
+            border-left-color: #dc3545;
+        }
+        
+        .transaction-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        
+        .transaction-amount {
+            font-weight: bold;
+            font-size: 18px;
+        }
+        
+        .transaction-category {
+            color: #666;
+        }
+        
+        .transaction-date {
+            color: #999;
+            font-size: 12px;
+        }
+        
+        .transaction-desc {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .stats-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 15px;
+            text-align: center;
+        }
+        
+        .stats-card h3 {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        
+        .stats-card .value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .category-progress {
+            margin-bottom: 15px;
+        }
+        
+        .category-name {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        
+        .menu-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .menu-item {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 2px solid #f0f0f0;
+        }
+        
+        .menu-item:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            border-color: #667eea;
+        }
+        
+        .menu-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        
+        .menu-title {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+            animation: fadeIn 0.5s;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .text-center {
+            text-align: center;
+        }
+        
+        .mt-20 {
+            margin-top: 20px;
+        }
+        
+        .delete-btn {
+            background: #dc3545;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>💰 Moliya Hisobchisi</h1>
+            <p>User ID: {{ user_id }}</p>
+        </div>
+        
+        <div class="balance-card">
+            <div class="balance-title">Jami balans</div>
+            <div class="balance-amount">{{ "{:,.0f}".format(balance) }} so'm</div>
+            <div class="balance-stats">
+                <div class="stat-item">
+                    <div>Daromad</div>
+                    <div class="stat-value" style="color: #28a745;">+{{ "{:,.0f}".format(today_income) }}</div>
+                </div>
+                <div class="stat-item">
+                    <div>Xarajat</div>
+                    <div class="stat-value" style="color: #dc3545;">-{{ "{:,.0f}".format(today_expense) }}</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="menu-grid">
+            <div class="menu-item" onclick="location.href='/webapp/income/{{ user_id }}'">
+                <div class="menu-icon">💰</div>
+                <div class="menu-title">Daromad</div>
+            </div>
+            <div class="menu-item" onclick="location.href='/webapp/expense/{{ user_id }}'">
+                <div class="menu-icon">💸</div>
+                <div class="menu-title">Xarajat</div>
+            </div>
+            <div class="menu-item" onclick="location.href='/webapp/history/{{ user_id }}'">
+                <div class="menu-icon">📜</div>
+                <div class="menu-title">Tarix</div>
+            </div>
+            <div class="menu-item" onclick="location.href='/webapp/stats/{{ user_id }}'">
+                <div class="menu-icon">📊</div>
+                <div class="menu-title">Statistika</div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>📋 Oxirgi operatsiyalar</h2>
+            {% for t in transactions %}
+            <div class="transaction-item {% if t.type == 'income' %}transaction-income{% else %}transaction-expense{% endif %}">
+                <div class="transaction-header">
+                    <span class="transaction-category">{{ t.category }}</span>
+                    <span class="transaction-amount {% if t.type == 'income' %}text-success{% else %}text-danger{% endif %}">
+                        {% if t.type == 'income' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(t.amount) }} so'm
+                    </span>
+                </div>
+                {% if t.description %}
+                <div class="transaction-desc">{{ t.description }}</div>
+                {% endif %}
+                <div class="transaction-date">{{ t.date }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+'''
 
-# FinanceBot obyektini yaratish
-finance = FinanceBot()
+ADD_TRANSACTION_HTML = '''
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            animation: slideUp 0.5s ease;
+        }
+        
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+        
+        input, select, textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-size: 16px;
+            transition: all 0.3s;
+        }
+        
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .btn {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn-group .btn {
+            flex: 1;
+        }
+        
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>{{ emoji }} {{ title }}</h1>
+            
+            {% if success %}
+            <div class="success-message">
+                ✅ {{ success }}
+            </div>
+            {% endif %}
+            
+            <form method="POST">
+                <div class="form-group">
+                    <label>Kategoriya</label>
+                    <select name="category" required>
+                        {% for cat in categories %}
+                        <option value="{{ cat }}">{{ cat }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>Miqdor (so'm)</label>
+                    <input type="number" name="amount" placeholder="Masalan: 50000" required min="1">
+                </div>
+                
+                <div class="form-group">
+                    <label>Tavsif (ixtiyoriy)</label>
+                    <textarea name="description" rows="3" placeholder="Tavsif kiriting..."></textarea>
+                </div>
+                
+                <div class="btn-group">
+                    <button type="submit" class="btn btn-primary">Saqlash</button>
+                    <button type="button" class="btn btn-secondary" onclick="location.href='/webapp/{{ user_id }}'">Bekor qilish</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+'''
 
-# ==================== BOT HANDLERLARI ====================
+HISTORY_HTML = '''
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Operatsiyalar tarixi</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            animation: slideUp 0.5s ease;
+        }
+        
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .transaction-item {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-left: 4px solid;
+            transition: transform 0.2s;
+        }
+        
+        .transaction-item:hover {
+            transform: translateX(5px);
+        }
+        
+        .transaction-income {
+            border-left-color: #28a745;
+        }
+        
+        .transaction-expense {
+            border-left-color: #dc3545;
+        }
+        
+        .transaction-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        
+        .transaction-amount {
+            font-weight: bold;
+            font-size: 18px;
+        }
+        
+        .transaction-category {
+            color: #666;
+        }
+        
+        .transaction-date {
+            color: #999;
+            font-size: 12px;
+        }
+        
+        .transaction-desc {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>📜 Operatsiyalar tarixi</h1>
+            
+            {% for t in transactions %}
+            <div class="transaction-item {% if t.type == 'income' %}transaction-income{% else %}transaction-expense{% endif %}">
+                <div class="transaction-header">
+                    <span class="transaction-category">{{ t.category }}</span>
+                    <span class="transaction-amount {% if t.type == 'income' %}text-success{% else %}text-danger{% endif %}">
+                        {% if t.type == 'income' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(t.amount) }} so'm
+                    </span>
+                </div>
+                {% if t.description %}
+                <div class="transaction-desc">{{ t.description }}</div>
+                {% endif %}
+                <div class="transaction-date">{{ t.date }}</div>
+            </div>
+            {% endfor %}
+            
+            <button class="btn" style="width: 100%; margin-top: 20px;" onclick="location.href='/webapp/{{ user_id }}'">
+                🔙 Orqaga
+            </button>
+        </div>
+    </div>
+</body>
+</html>
+'''
 
+STATS_HTML = '''
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Statistika</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            animation: slideUp 0.5s ease;
+        }
+        
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        
+        .stats-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .stats-card h3 {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-bottom: 10px;
+        }
+        
+        .stats-card .value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .category-stats {
+            margin-top: 20px;
+        }
+        
+        .category-item {
+            margin-bottom: 15px;
+        }
+        
+        .category-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+        
+        .category-name {
+            font-weight: 600;
+        }
+        
+        .category-amount {
+            color: #666;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 10px;
+            background: #e0e0e0;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 5px;
+            transition: width 0.3s;
+        }
+        
+        .monthly-stats {
+            margin-top: 20px;
+        }
+        
+        .month-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .month-name {
+            font-weight: 600;
+        }
+        
+        .month-income {
+            color: #28a745;
+        }
+        
+        .month-expense {
+            color: #dc3545;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 100%;
+            margin-top: 20px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>📊 Statistika</h1>
+            
+            <div class="stats-grid">
+                <div class="stats-card">
+                    <h3>Jami daromad</h3>
+                    <div class="value">{{ "{:,.0f}".format(total_income) }} so'm</div>
+                </div>
+                <div class="stats-card">
+                    <h3>Jami xarajat</h3>
+                    <div class="value">{{ "{:,.0f}".format(total_expense) }} so'm</div>
+                </div>
+            </div>
+            
+            <div class="category-stats">
+                <h2>📉 Xarajatlar kategoriyalari</h2>
+                {% for cat, amount, percent in expense_cats %}
+                <div class="category-item">
+                    <div class="category-header">
+                        <span class="category-name">{{ cat }}</span>
+                        <span class="category-amount">{{ "{:,.0f}".format(amount) }} so'm ({{ "%.1f"|format(percent) }}%)</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: {{ percent }}%"></div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <div class="monthly-stats">
+                <h2>📅 Oylik statistika</h2>
+                {% for month, income, expense in monthly_stats %}
+                <div class="month-item">
+                    <span class="month-name">{{ month }}</span>
+                    <span>
+                        <span class="month-income">+{{ "{:,.0f}".format(income) }}</span>
+                        <span class="month-expense"> -{{ "{:,.0f}".format(expense) }}</span>
+                    </span>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <button class="btn" onclick="location.href='/webapp/{{ user_id }}'">
+                🔙 Orqaga
+            </button>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+# Ma'lumotlar bazasi
+def init_database():
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                (user_id INTEGER PRIMARY KEY,
+                 username TEXT,
+                 first_name TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id INTEGER,
+                 amount REAL,
+                 description TEXT,
+                 category TEXT,
+                 type TEXT,
+                 date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS categories
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id INTEGER,
+                 name TEXT,
+                 type TEXT)''')
+    
+    conn.commit()
+    conn.close()
+
+def get_user_data(user_id):
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    
+    # Balans
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
+    income = c.fetchone()[0] or 0
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
+    expense = c.fetchone()[0] or 0
+    balance = income - expense
+    
+    # Bugungi statistika
+    today = datetime.now().strftime("%Y-%m-%d")
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income' AND date LIKE ?", 
+             (user_id, f"{today}%"))
+    today_income = c.fetchone()[0] or 0
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense' AND date LIKE ?", 
+             (user_id, f"{today}%"))
+    today_expense = c.fetchone()[0] or 0
+    
+    # Oxirgi operatsiyalar
+    c.execute('''SELECT amount, description, category, type, 
+                strftime('%d.%m.%Y %H:%M', date) as datetime 
+                FROM transactions WHERE user_id=? ORDER BY date DESC LIMIT 5''', (user_id,))
+    transactions = []
+    for row in c.fetchall():
+        transactions.append({
+            'amount': row[0],
+            'description': row[1],
+            'category': row[2],
+            'type': row[3],
+            'date': row[4]
+        })
+    
+    conn.close()
+    return balance, today_income, today_expense, transactions
+
+def get_categories(user_id, trans_type):
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    
+    # Default kategoriyalar
+    default_cats = {
+        'income': ['💰 Ish haqi', '💼 Bonus', '📱 Freelance', '🎁 Sovg\'a', '💹 Investitsiya'],
+        'expense': ['🍽️ Ovqat', '🚖 Transport', '🛒 Kiyim', '🏠 Uy', '📞 Telefon', '🎮 Ko\'ngilochar', '🏥 Sog\'liq', '📚 Ta\'lim']
+    }
+    
+    c.execute("SELECT name FROM categories WHERE user_id=? AND type=?", (user_id, trans_type))
+    db_cats = [row[0] for row in c.fetchall()]
+    
+    if not db_cats:
+        # Default kategoriyalarni qo'shish
+        for cat in default_cats[trans_type]:
+            c.execute("INSERT INTO categories (user_id, name, type) VALUES (?, ?, ?)",
+                     (user_id, cat, trans_type))
+        conn.commit()
+        categories = default_cats[trans_type]
+    else:
+        categories = db_cats
+    
+    conn.close()
+    return categories
+
+def add_transaction(user_id, amount, description, category, trans_type):
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO transactions (user_id, amount, description, category, type)
+                VALUES (?, ?, ?, ?, ?)''',
+             (user_id, amount, description, category, trans_type))
+    conn.commit()
+    conn.close()
+
+def get_history(user_id, limit=50):
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    c.execute('''SELECT amount, description, category, type, 
+                strftime('%d.%m.%Y %H:%M', date) as datetime 
+                FROM transactions WHERE user_id=? ORDER BY date DESC LIMIT ?''', 
+             (user_id, limit))
+    transactions = []
+    for row in c.fetchall():
+        transactions.append({
+            'amount': row[0],
+            'description': row[1],
+            'category': row[2],
+            'type': row[3],
+            'date': row[4]
+        })
+    conn.close()
+    return transactions
+
+def get_stats(user_id):
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    
+    # Jami daromad va xarajat
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
+    total_income = c.fetchone()[0] or 0
+    c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
+    total_expense = c.fetchone()[0] or 0
+    
+    # Kategoriyalar bo'yicha xarajatlar
+    c.execute('''SELECT category, SUM(amount) FROM transactions 
+                WHERE user_id=? AND type='expense' 
+                GROUP BY category ORDER BY SUM(amount) DESC''', (user_id,))
+    expense_cats = []
+    for cat, amount in c.fetchall():
+        percent = (amount / total_expense * 100) if total_expense > 0 else 0
+        expense_cats.append((cat, amount, percent))
+    
+    # Oylik statistika
+    c.execute('''SELECT strftime('%Y-%m', date) as month,
+                       SUM(CASE WHEN type='income' THEN amount ELSE 0 END) as income,
+                       SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) as expense
+                FROM transactions WHERE user_id=?
+                GROUP BY month ORDER BY month DESC LIMIT 6''', (user_id,))
+    
+    monthly_stats = []
+    for row in c.fetchall():
+        month = row[0]
+        year, month_num = month.split('-')
+        month_names = ['Yan', 'Fev', 'Mar', 'Apr', 'May', 'Iyun',
+                      'Iyul', 'Avg', 'Sen', 'Okt', 'Noy', 'Dek']
+        month_name = month_names[int(month_num) - 1]
+        monthly_stats.append((f"{month_name} {year}", row[1] or 0, row[2] or 0))
+    
+    conn.close()
+    return total_income, total_expense, expense_cats, monthly_stats
+
+# Flask routes
+@app.route('/webapp/<int:user_id>')
+def webapp_main(user_id):
+    balance, today_income, today_expense, transactions = get_user_data(user_id)
+    return render_template_string(WEB_APP_HTML, 
+                                 user_id=user_id,
+                                 balance=balance,
+                                 today_income=today_income,
+                                 today_expense=today_expense,
+                                 transactions=transactions)
+
+@app.route('/webapp/income/<int:user_id>', methods=['GET', 'POST'])
+def webapp_income(user_id):
+    categories = get_categories(user_id, 'income')
+    
+    if request.method == 'POST':
+        amount = float(request.form['amount'])
+        description = request.form['description']
+        category = request.form['category']
+        
+        add_transaction(user_id, amount, description, category, 'income')
+        
+        return render_template_string(ADD_TRANSACTION_HTML,
+                                     user_id=user_id,
+                                     title="Daromad qo'shish",
+                                     emoji="💰",
+                                     categories=categories,
+                                     success="Daromad muvaffaqiyatli qo'shildi!")
+    
+    return render_template_string(ADD_TRANSACTION_HTML,
+                                 user_id=user_id,
+                                 title="Daromad qo'shish",
+                                 emoji="💰",
+                                 categories=categories,
+                                 success=None)
+
+@app.route('/webapp/expense/<int:user_id>', methods=['GET', 'POST'])
+def webapp_expense(user_id):
+    categories = get_categories(user_id, 'expense')
+    
+    if request.method == 'POST':
+        amount = float(request.form['amount'])
+        description = request.form['description']
+        category = request.form['category']
+        
+        add_transaction(user_id, amount, description, category, 'expense')
+        
+        return render_template_string(ADD_TRANSACTION_HTML,
+                                     user_id=user_id,
+                                     title="Xarajat qo'shish",
+                                     emoji="💸",
+                                     categories=categories,
+                                     success="Xarajat muvaffaqiyatli qo'shildi!")
+    
+    return render_template_string(ADD_TRANSACTION_HTML,
+                                 user_id=user_id,
+                                 title="Xarajat qo'shish",
+                                 emoji="💸",
+                                 categories=categories,
+                                 success=None)
+
+@app.route('/webapp/history/<int:user_id>')
+def webapp_history(user_id):
+    transactions = get_history(user_id, 50)
+    return render_template_string(HISTORY_HTML,
+                                 user_id=user_id,
+                                 transactions=transactions)
+
+@app.route('/webapp/stats/<int:user_id>')
+def webapp_stats(user_id):
+    total_income, total_expense, expense_cats, monthly_stats = get_stats(user_id)
+    return render_template_string(STATS_HTML,
+                                 user_id=user_id,
+                                 total_income=total_income,
+                                 total_expense=total_expense,
+                                 expense_cats=expense_cats,
+                                 monthly_stats=monthly_stats)
+
+# Telegram bot handlers
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    """Start komandasi"""
+def start(message):
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Foydalanuvchini ro'yxatdan o'tkazish
-    finance.register_user(user_id, username, first_name)
+    # Foydalanuvchini saqlash
+    conn = sqlite3.connect('finance.db')
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+             (user_id, username, first_name))
+    conn.commit()
+    conn.close()
     
-    # Asosiy menyu
-    show_main_menu(message.chat.id, first_name)
-
-def show_main_menu(chat_id, first_name=None):
-    """Asosiy menyuni ko'rsatish"""
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    # Web App tugmasi
+    markup = types.InlineKeyboardMarkup()
+    web_app = types.WebAppInfo(url=f"https://your-domain.com/webapp/{user_id}")
+    btn = types.InlineKeyboardButton("🚀 Web App ni ochish", web_app=web_app)
+    markup.add(btn)
     
-    btn1 = types.InlineKeyboardButton("💰 Daromad", callback_data='menu_income')
-    btn2 = types.InlineKeyboardButton("💸 Xarajat", callback_data='menu_expense')
-    btn3 = types.InlineKeyboardButton("📊 Balans", callback_data='menu_balance')
-    btn4 = types.InlineKeyboardButton("📋 Bugun", callback_data='menu_today')
-    btn5 = types.InlineKeyboardButton("📜 Tarix", callback_data='menu_history')
-    btn6 = types.InlineKeyboardButton("📈 Statistika", callback_data='menu_stats')
-    btn7 = types.InlineKeyboardButton("🗑️ O'chirish", callback_data='menu_delete')
-    btn8 = types.InlineKeyboardButton("❓ Yordam", callback_data='menu_help')
-    
-    markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8)
-    
-    welcome_text = (
-        f"👋 Assalomu alaykum, {first_name if first_name else 'foydalanuvchi'}!\n\n"
+    bot.send_message(
+        message.chat.id,
+        f"👋 Assalomu alaykum, {first_name}!\n\n"
         f"💰 Moliya hisobchisi botiga xush kelibsiz!\n\n"
-        f"📌 Quyidagi tugmalardan foydalaning:"
-    )
-    
-    bot.send_message(chat_id, welcome_text, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    """Callback handler"""
-    chat_id = call.message.chat.id
-    message_id = call.message.message_id
-    user_id = call.from_user.id
-    
-    try:
-        if call.data == 'menu_income':
-            show_income_categories(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_expense':
-            show_expense_categories(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_balance':
-            show_balance(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_today':
-            show_today(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_history':
-            show_history(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_stats':
-            show_stats(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_delete':
-            show_delete_menu(chat_id, message_id, user_id)
-        
-        elif call.data == 'menu_help':
-            show_help(chat_id, message_id)
-        
-        elif call.data == 'back_to_main':
-            bot.delete_message(chat_id, message_id)
-            show_main_menu(chat_id)
-        
-        elif call.data.startswith('cat_income_'):
-            category = call.data.replace('cat_income_', '')
-            ask_amount(chat_id, message_id, user_id, 'income', category)
-        
-        elif call.data.startswith('cat_expense_'):
-            category = call.data.replace('cat_expense_', '')
-            ask_amount(chat_id, message_id, user_id, 'expense', category)
-        
-        elif call.data.startswith('delete_'):
-            parts = call.data.split('_')
-            transaction_id = int(parts[1])
-            confirm_delete(chat_id, message_id, user_id, transaction_id)
-        
-        elif call.data.startswith('confirm_delete_'):
-            transaction_id = int(call.data.replace('confirm_delete_', ''))
-            execute_delete(chat_id, message_id, user_id, transaction_id)
-        
-        elif call.data == 'cancel_delete':
-            bot.delete_message(chat_id, message_id)
-            show_main_menu(chat_id)
-        
-    except Exception as e:
-        logger.error(f"Callback xatosi: {e}")
-        bot.send_message(chat_id, "❌ Xatolik yuz berdi. Iltimos, qaytadan urinib ko'ring.")
-
-def show_income_categories(chat_id, message_id, user_id):
-    """Daromad kategoriyalarini ko'rsatish"""
-    categories = finance.get_categories(user_id, 'income')
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for cat_name, icon in categories:
-        callback_data = f"cat_income_{cat_name}"
-        markup.add(types.InlineKeyboardButton(f"{icon} {cat_name}", callback_data=callback_data))
-    
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(
-        "💰 Daromad kategoriyasini tanlang:",
-        chat_id,
-        message_id,
+        f"📌 Quyidagi tugmani bosib, chiroyli web interfeys orqali boshqaring:",
         reply_markup=markup
     )
 
-def show_expense_categories(chat_id, message_id, user_id):
-    """Xarajat kategoriyalarini ko'rsatish"""
-    categories = finance.get_categories(user_id, 'expense')
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for cat_name, icon in categories:
-        callback_data = f"cat_expense_{cat_name}"
-        markup.add(types.InlineKeyboardButton(f"{icon} {cat_name}", callback_data=callback_data))
-    
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(
-        "💸 Xarajat kategoriyasini tanlang:",
-        chat_id,
-        message_id,
-        reply_markup=markup
-    )
+# Flask ni alohida threadda ishga tushirish
+def run_flask():
+    app.run(host='0.0.0.0', port=5000, debug=False)
 
-def ask_amount(chat_id, message_id, user_id, trans_type, category):
-    """Miqdorni so'rash"""
-    user_states[user_id] = {
-        'step': 'waiting_amount',
-        'type': trans_type,
-        'category': category
-    }
-    
-    text = f"📝 {category} uchun miqdorni kiriting (so'm):"
-    bot.delete_message(chat_id, message_id)
-    msg = bot.send_message(chat_id, text)
-    
-    # Xabarni saqlash keyin o'chirish uchun
-    user_states[user_id]['last_message_id'] = msg.message_id
-
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    """Xabarlarni qayta ishlash"""
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    text = message.text.strip()
-    
-    # Foydalanuvchi holatini tekshirish
-    if user_id in user_states:
-        state = user_states[user_id]
-        
-        if state.get('step') == 'waiting_amount':
-            try:
-                amount = float(text.replace(' ', ''))
-                if amount <= 0:
-                    bot.send_message(chat_id, "❌ Miqdor musbat son bo'lishi kerak!")
-                    return
-                
-                state['amount'] = amount
-                state['step'] = 'waiting_description'
-                
-                bot.send_message(chat_id, "📝 Tavsif kiriting (yoki /skip ni bosing):")
-                
-            except ValueError:
-                bot.send_message(chat_id, "❌ Xato! Iltimos, faqat son kiriting (masalan: 50000):")
-        
-        elif state.get('step') == 'waiting_description':
-            description = text if text != '/skip' else ''
-            
-            # Transaksiyani saqlash
-            finance.add_transaction(
-                user_id,
-                state['amount'],
-                description,
-                state['category'],
-                state['type']
-            )
-            
-            emoji = "✅" if state['type'] == 'income' else "➖"
-            type_text = "daromad" if state['type'] == 'income' else "xarajat"
-            
-            bot.send_message(
-                chat_id,
-                f"{emoji} <b>{type_text.title()} qo'shildi!</b>\n\n"
-                f"💰 Miqdor: <b>{state['amount']:,.0f} so'm</b>\n"
-                f"📁 Kategoriya: {state['category']}\n"
-                f"📝 Tavsif: {description if description else 'yo\'q'}",
-                parse_mode='HTML'
-            )
-            
-            # Holatni tozalash
-            del user_states[user_id]
-            
-            # Asosiy menyuni ko'rsatish
-            show_main_menu(chat_id)
-    
-    else:
-        # Agar holat bo'lmasa, start komandasini eslatish
-        bot.send_message(chat_id, "❌ Noto'g'ri buyruq. /start ni bosing.")
-
-@bot.message_handler(commands=['skip'])
-def handle_skip(message):
-    """Skip komandasi"""
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if user_id in user_states and user_states[user_id].get('step') == 'waiting_description':
-        description = ''
-        
-        state = user_states[user_id]
-        
-        # Transaksiyani saqlash
-        finance.add_transaction(
-            user_id,
-            state['amount'],
-            description,
-            state['category'],
-            state['type']
-        )
-        
-        emoji = "✅" if state['type'] == 'income' else "➖"
-        type_text = "daromad" if state['type'] == 'income' else "xarajat"
-        
-        bot.send_message(
-            chat_id,
-            f"{emoji} <b>{type_text.title()} qo'shildi!</b>\n\n"
-            f"💰 Miqdor: <b>{state['amount']:,.0f} so'm</b>\n"
-            f"📁 Kategoriya: {state['category']}",
-            parse_mode='HTML'
-        )
-        
-        # Holatni tozalash
-        del user_states[user_id]
-        
-        # Asosiy menyuni ko'rsatish
-        show_main_menu(chat_id)
-
-def show_balance(chat_id, message_id, user_id):
-    """Balansni ko'rsatish"""
-    balance, total_income, total_expense = finance.get_balance(user_id)
-    today_income, today_expense = finance.get_today_stats(user_id)
-    
-    text = (
-        f"💰 <b>SIZNING BALANSINGIZ</b>\n\n"
-        f"💵 Jami balans: <b>{balance:+,.0f} so'm</b>\n\n"
-        f"📊 <b>Bugungi statistika:</b>\n"
-        f"   ➕ Daromad: {today_income:,.0f} so'm\n"
-        f"   ➖ Xarajat: {today_expense:,.0f} so'm\n"
-        f"   📍 Farq: {today_income - today_expense:+,.0f} so'm\n\n"
-        f"📈 <b>Jami:</b>\n"
-        f"   ➕ Jami daromad: {total_income:,.0f} so'm\n"
-        f"   ➖ Jami xarajat: {total_expense:,.0f} so'm"
-    )
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-
-def show_today(chat_id, message_id, user_id):
-    """Bugungi operatsiyalarni ko'rsatish"""
-    transactions = finance.get_today_transactions(user_id)
-    
-    if not transactions:
-        text = "📭 Bugun hech qanday operatsiya bo'lmagan."
-    else:
-        text = "📋 <b>BUGUNGI OPERATSIYALAR</b>\n\n"
-        for amount, desc, cat, typ, time in transactions:
-            emoji = "➕" if typ == 'income' else "➖"
-            color = "✅" if typ == 'income' else "❌"
-            text += f"{emoji} <b>{amount:,.0f} so'm</b> - {cat}\n"
-            if desc:
-                text += f"   📝 {desc}\n"
-            text += f"   🕐 {time}\n\n"
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-
-def show_history(chat_id, message_id, user_id):
-    """Operatsiyalar tarixini ko'rsatish"""
-    transactions = finance.get_history(user_id, 20)
-    
-    if not transactions:
-        text = "📭 Hech qanday operatsiya topilmadi."
-    else:
-        text = "📜 <b>SO'NGI 20 OPERATSIYA</b>\n\n"
-        for amount, desc, cat, typ, dt in transactions:
-            emoji = "➕" if typ == 'income' else "➖"
-            text += f"{emoji} <b>{amount:,.0f} so'm</b> - {cat}\n"
-            text += f"   🕐 {dt}\n"
-            if desc:
-                text += f"   📝 {desc}\n"
-            text += "\n"
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-
-def show_stats(chat_id, message_id, user_id):
-    """Statistikani ko'rsatish"""
-    balance, total_income, total_expense = finance.get_balance(user_id)
-    expense_cats, monthly_stats = finance.get_stats(user_id)
-    
-    text = (
-        f"📊 <b>STATISTIKA</b>\n\n"
-        f"💰 <b>Umumiy:</b>\n"
-        f"   ➕ Jami daromad: {total_income:,.0f} so'm\n"
-        f"   ➖ Jami xarajat: {total_expense:,.0f} so'm\n"
-        f"   💵 Tejam: {total_income - total_expense:+,.0f} so'm\n\n"
-    )
-    
-    if expense_cats:
-        text += "📉 <b>Xarajatlar kategoriyalari:</b>\n"
-        for cat, amount, count in expense_cats:
-            percent = (amount / total_expense * 100) if total_expense > 0 else 0
-            bar = "█" * int(percent / 5)
-            text += f"   {cat}: {amount:,.0f} so'm ({percent:.1f}%)\n"
-            text += f"      {bar} {count} marta\n\n"
-    
-    if monthly_stats:
-        text += "📅 <b>Oxirgi 6 oy:</b>\n"
-        for month, income, expense in monthly_stats:
-            year, month_num = month.split('-')
-            month_names = ['Yan', 'Fev', 'Mar', 'Apr', 'May', 'Iyun',
-                          'Iyul', 'Avg', 'Sen', 'Okt', 'Noy', 'Dek']
-            month_name = month_names[int(month_num) - 1]
-            text += f"   {month_name} {year}: +{income:,.0f} | -{expense:,.0f} = {income - expense:+,.0f}\n"
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-
-def show_delete_menu(chat_id, message_id, user_id):
-    """O'chirish menyusini ko'rsatish"""
-    transactions = finance.get_transactions_for_delete(user_id, 10)
-    
-    if not transactions:
-        bot.edit_message_text(
-            "📭 O'chirish uchun operatsiyalar mavjud emas.",
-            chat_id,
-            message_id,
-            reply_markup=types.InlineKeyboardMarkup().add(
-                types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main')
-            )
-        )
-        return
-    
-    text = "🗑️ <b>O'CHIRISH UCHUN OPERATSIYA TANLANG</b>\n\n"
-    
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    
-    for tid, amount, desc, cat, typ, dt in transactions:
-        emoji = "➕" if typ == 'income' else "➖"
-        btn_text = f"{emoji} {amount:,.0f} so'm - {cat} ({dt})"
-        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"delete_{tid}"))
-    
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-
-def confirm_delete(chat_id, message_id, user_id, transaction_id):
-    """O'chirishni tasdiqlash"""
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("✅ Ha", callback_data=f"confirm_delete_{transaction_id}"),
-        types.InlineKeyboardButton("❌ Yo'q", callback_data='cancel_delete')
-    )
-    
-    bot.edit_message_text(
-        "⚠️ Bu operatsiyani o'chirmoqchimisiz?",
-        chat_id,
-        message_id,
-        reply_markup=markup
-    )
-
-def execute_delete(chat_id, message_id, user_id, transaction_id):
-    """Transaksiyani o'chirish"""
-    success = finance.delete_transaction(user_id, transaction_id)
-    
-    if success:
-        text = "✅ Operatsiya muvaffaqiyatli o'chirildi!"
-    else:
-        text = "❌ Operatsiyani o'chirishda xatolik yuz berdi."
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Menyu", callback_data='back_to_main'))
-    
-    bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
-
-def show_help(chat_id, message_id):
-    """Yordam ma'lumotlarini ko'rsatish"""
-    help_text = (
-        "❓ <b>YORDAM</b>\n\n"
-        "💰 <b>Daromad qo'shish:</b>\n"
-        "   Daromad tugmasini bosing -> kategoriya tanlang -> miqdor kiriting\n\n"
-        "💸 <b>Xarajat qo'shish:</b>\n"
-        "   Xarajat tugmasini bosing -> kategoriya tanlang -> miqdor kiriting\n\n"
-        "📊 <b>Balans:</b>\n"
-        "   Jami balans va bugungi statistikani ko'rish\n\n"
-        "📋 <b>Bugun:</b>\n"
-        "   Bugungi barcha operatsiyalar ro'yxati\n\n"
-        "📜 <b>Tarix:</b>\n"
-        "   So'nggi 20 operatsiya\n\n"
-        "📈 <b>Statistika:</b>\n"
-        "   Kategoriyalar bo'yicha tahlil\n\n"
-        "🗑️ <b>O'chirish:</b>\n"
-        "   Xato kiritilgan operatsiyani o'chirish\n\n"
-        "🤖 <b>Bot haqida:</b>\n"
-        "   Versiya: 1.0\n"
-        "   Yaratilgan: 2024"
-    )
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
-    
-    bot.edit_message_text(help_text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-
-@bot.message_handler(commands=['help'])
-def send_help(message):
-    """Help komandasi"""
-    show_help(message.chat.id, message.message_id)
-
-# ==================== BOTNI ISHGA TUSHIRISH ====================
-
-def main():
-    """Asosiy funksiya"""
+# Botni ishga tushirish
+if __name__ == '__main__':
     print("=" * 50)
-    print("💰 MOLIYA HISOBCHISI BOTI")
+    print("💰 MOLIYA HISOBCHISI BOTI (WEB APP)")
     print("=" * 50)
-    print(f"🤖 Bot token: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:]}")
+    
+    # Ma'lumotlar bazasini yaratish
+    init_database()
+    
+    # Flask ni threadda ishga tushirish
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("✅ Web App ishga tushdi: http://localhost:5000")
+    
+    # Botni ishga tushirish
     print("✅ Bot ishga tushmoqda...")
+    print("=" * 50)
     
     try:
-        bot_info = bot.get_me()
-        print(f"✅ Bot nomi: {bot_info.first_name}")
-        print(f"✅ Bot username: @{bot_info.username}")
-        print("=" * 50)
-        print("🟢 Bot ishlamoqda...")
-        print("=" * 50)
-        
-        # Botni ishga tushirish
         bot.infinity_polling()
-        
     except Exception as e:
         print(f"❌ Xatolik: {e}")
-        print("⚠️ Bot to'xtatildi.")
-
-if __name__ == "__main__":
-    main()
