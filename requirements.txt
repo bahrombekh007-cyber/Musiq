@@ -1,3 +1,7 @@
 python-telegram-bot==20.7
 pyTelegramBotAPI==4.21.0
 flask
+telebot
+requests
+python-dotenv
+gunicorn
