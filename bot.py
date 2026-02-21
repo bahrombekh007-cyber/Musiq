@@ -1,39 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
-import sys
-import sqlite3
-import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-import time
-import threading
-
-# Telegram bot uchun
 import telebot
 from telebot import types
+import sqlite3
+from datetime import datetime, timedelta
+import logging
+import time
+from typing import Dict, List, Optional
 
-# Konsol uchun ranglar
-class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    END = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+# Logging sozlamalari
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-class FinanceManager:
+# Bot tokeni (sizning tokeningiz)
+BOT_TOKEN = "8418511713:AAFkb9zPXNqdwaw4sb3AmjSLQkTKeBXRMVM"
+
+# Botni yaratish
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Foydalanuvchi holatlarini saqlash
+user_states = {}
+
+class FinanceBot:
     def __init__(self):
-        self.bot_token = "8418511713:AAFkb9zPXNqdwaw4sb3AmjSLQkTKeBXRMVM"
-        self.bot = None
-        self.user_id = 1  # Default user ID
         self.init_database()
-        self.init_bot()
-        
+    
     def init_database(self):
         """Ma'lumotlar bazasini yaratish"""
         conn = sqlite3.connect('finance_data.db')
@@ -41,11 +36,10 @@ class FinanceManager:
         
         # Foydalanuvchilar jadvali
         c.execute('''CREATE TABLE IF NOT EXISTS users
-                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     username TEXT UNIQUE,
-                     password TEXT,
-                     bot_token TEXT,
-                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                    (user_id INTEGER PRIMARY KEY,
+                     username TEXT,
+                     first_name TEXT,
+                     registered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
         # Kategoriyalar jadvali
         c.execute('''CREATE TABLE IF NOT EXISTS categories
@@ -54,7 +48,7 @@ class FinanceManager:
                      name TEXT,
                      type TEXT,
                      icon TEXT,
-                     FOREIGN KEY (user_id) REFERENCES users (id))''')
+                     FOREIGN KEY (user_id) REFERENCES users (user_id))''')
         
         # Transaksiyalar jadvali
         c.execute('''CREATE TABLE IF NOT EXISTS transactions
@@ -65,235 +59,101 @@ class FinanceManager:
                      category TEXT,
                      type TEXT,
                      date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                     FOREIGN KEY (user_id) REFERENCES users (id))''')
-        
-        # Default user yaratish
-        c.execute("INSERT OR IGNORE INTO users (id, username, password, bot_token) VALUES (1, 'admin', 'admin123', ?)",
-                 (self.bot_token,))
-        
-        # Default kategoriyalar
-        default_categories = [
-            (1, '💰 Ish haqi', 'income', '💼'),
-            (1, '💼 Bonus', 'income', '🎁'),
-            (1, '📱 Freelance', 'income', '💻'),
-            (1, '🎁 Sovg\'a', 'income', '🎀'),
-            (1, '🍽️ Ovqat', 'expense', '🍔'),
-            (1, '🚖 Transport', 'expense', '🚗'),
-            (1, '🛒 Kiyim', 'expense', '👕'),
-            (1, '🏠 Uy', 'expense', '🏡'),
-            (1, '🎮 Ko\'ngilochar', 'expense', '🎮'),
-            (1, '📞 Telefon', 'expense', '📱')
-        ]
-        
-        for cat in default_categories:
-            c.execute("INSERT OR IGNORE INTO categories (user_id, name, type, icon) VALUES (?, ?, ?, ?)",
-                     cat)
+                     FOREIGN KEY (user_id) REFERENCES users (user_id))''')
         
         conn.commit()
         conn.close()
     
-    def init_bot(self):
-        """Telegram botni ishga tushirish"""
-        try:
-            self.bot = telebot.TeleBot(self.bot_token)
-            self.setup_bot_handlers()
-            print(f"{Colors.GREEN}✅ Telegram bot muvaffaqiyatli ishga tushdi!{Colors.END}")
-            print(f"{Colors.CYAN}🤖 Bot username: @{self.bot.get_me().username}{Colors.END}")
-        except Exception as e:
-            print(f"{Colors.FAIL}❌ Bot ishga tushmadi: {e}{Colors.END}")
-            self.bot = None
-    
-    def setup_bot_handlers(self):
-        """Bot handlerlarini sozlash"""
-        
-        @self.bot.message_handler(commands=['start'])
-        def send_welcome(message):
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            
-            btn1 = types.InlineKeyboardButton("💰 Daromad", callback_data='income')
-            btn2 = types.InlineKeyboardButton("💸 Xarajat", callback_data='expense')
-            btn3 = types.InlineKeyboardButton("📊 Balans", callback_data='balance')
-            btn4 = types.InlineKeyboardButton("📋 Bugun", callback_data='today')
-            btn5 = types.InlineKeyboardButton("📜 Tarix", callback_data='history')
-            btn6 = types.InlineKeyboardButton("📈 Statistika", callback_data='stats')
-            
-            markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
-            
-            welcome_text = (
-                f"👋 Assalomu alaykum, {message.from_user.first_name}!\n\n"
-                f"💰 Moliya hisobchisi botiga xush kelibsiz!\n\n"
-                f"📌 Quyidagi tugmalardan foydalaning:"
-            )
-            
-            self.bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
-        
-        @self.bot.callback_query_handler(func=lambda call: True)
-        def handle_callback(call):
-            if call.data == 'income':
-                self.show_categories(call.message, 'income')
-            elif call.data == 'expense':
-                self.show_categories(call.message, 'expense')
-            elif call.data == 'balance':
-                self.show_balance(call.message)
-            elif call.data == 'today':
-                self.show_today(call.message)
-            elif call.data == 'history':
-                self.show_history(call.message)
-            elif call.data == 'stats':
-                self.show_stats(call.message)
-            elif call.data.startswith('cat_'):
-                self.ask_amount(call.message, call.data)
-            elif call.data == 'back':
-                self.send_main_menu(call.message)
-            elif call.data.startswith('del_'):
-                self.delete_transaction(call.message, call.data)
-            
-            self.bot.answer_callback_query(call.id)
-        
-        @self.bot.message_handler(func=lambda message: True)
-        def handle_message(message):
-            if message.chat.id in self.user_states:
-                if self.user_states[message.chat.id].get('awaiting_amount'):
-                    self.save_transaction_amount(message)
-                elif self.user_states[message.chat.id].get('awaiting_description'):
-                    self.save_transaction_description(message)
-    
-    def user_states(self):
-        """Foydalanuvchi holatlarini boshqarish"""
-        if not hasattr(self, '_user_states'):
-            self._user_states = {}
-        return self._user_states
-    
-    def send_main_menu(self, message):
-        """Asosiy menyuni yuborish"""
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("💰 Daromad", callback_data='income'),
-            types.InlineKeyboardButton("💸 Xarajat", callback_data='expense'),
-            types.InlineKeyboardButton("📊 Balans", callback_data='balance'),
-            types.InlineKeyboardButton("📋 Bugun", callback_data='today'),
-            types.InlineKeyboardButton("📜 Tarix", callback_data='history'),
-            types.InlineKeyboardButton("📈 Statistika", callback_data='stats')
-        )
-        self.bot.send_message(message.chat.id, "📌 Asosiy menyu:", reply_markup=markup)
-    
-    def show_categories(self, message, trans_type):
-        """Kategoriyalarni ko'rsatish"""
+    def register_user(self, user_id, username, first_name):
+        """Yangi foydalanuvchini ro'yxatdan o'tkazish"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
-        c.execute("SELECT name, icon FROM categories WHERE user_id=? AND type=?", (1, trans_type))
+        
+        # Foydalanuvchini qo'shish
+        c.execute('''INSERT OR IGNORE INTO users (user_id, username, first_name)
+                    VALUES (?, ?, ?)''', (user_id, username, first_name))
+        
+        # Default kategoriyalar qo'shish
+        default_categories = [
+            (user_id, '💰 Ish haqi', 'income', '💼'),
+            (user_id, '💼 Bonus', 'income', '🎁'),
+            (user_id, '📱 Freelance', 'income', '💻'),
+            (user_id, '🎁 Sovg\'a', 'income', '🎀'),
+            (user_id, '🍽️ Ovqat', 'expense', '🍔'),
+            (user_id, '🚖 Transport', 'expense', '🚗'),
+            (user_id, '🛒 Kiyim', 'expense', '👕'),
+            (user_id, '🏠 Uy', 'expense', '🏡'),
+            (user_id, '📞 Telefon', 'expense', '📱'),
+            (user_id, '🎮 Ko\'ngilochar', 'expense', '🎮'),
+            (user_id, '🏥 Sog\'liq', 'expense', '💊'),
+            (user_id, '📚 Ta\'lim', 'expense', '📚')
+        ]
+        
+        for cat in default_categories:
+            c.execute('''INSERT OR IGNORE INTO categories (user_id, name, type, icon)
+                        VALUES (?, ?, ?, ?)''', cat)
+        
+        conn.commit()
+        conn.close()
+    
+    def get_categories(self, user_id, trans_type):
+        """Foydalanuvchi kategoriyalarini olish"""
+        conn = sqlite3.connect('finance_data.db')
+        c = conn.cursor()
+        c.execute('''SELECT name, icon FROM categories 
+                    WHERE user_id=? AND type=? 
+                    ORDER BY name''', (user_id, trans_type))
         categories = c.fetchall()
         conn.close()
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for cat_name, icon in categories:
-            markup.add(types.InlineKeyboardButton(
-                f"{icon} {cat_name}", 
-                callback_data=f"cat_{trans_type}_{cat_name}"
-            ))
-        markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back'))
-        
-        text = "💰 Kategoriyani tanlang:" if trans_type == 'income' else "💸 Kategoriyani tanlang:"
-        self.bot.send_message(message.chat.id, text, reply_markup=markup)
+        return categories
     
-    def ask_amount(self, message, callback_data):
-        """Miqdorni so'rash"""
-        chat_id = message.chat.id
-        if chat_id not in self.user_states():
-            self.user_states()[chat_id] = {}
-        
-        parts = callback_data.split('_')
-        self.user_states()[chat_id]['type'] = parts[1]
-        self.user_states()[chat_id]['category'] = parts[2]
-        self.user_states()[chat_id]['awaiting_amount'] = True
-        
-        self.bot.send_message(chat_id, "💰 Miqdorni kiriting (so'm):")
-    
-    def save_transaction_amount(self, message):
-        """Miqdorni saqlash va tavsif so'rash"""
-        try:
-            amount = float(message.text.replace(' ', ''))
-            chat_id = message.chat.id
-            
-            self.user_states()[chat_id]['amount'] = amount
-            self.user_states()[chat_id]['awaiting_amount'] = False
-            self.user_states()[chat_id]['awaiting_description'] = True
-            
-            self.bot.send_message(chat_id, "📝 Tavsif kiriting (yoki 'skip' yozing):")
-        except ValueError:
-            self.bot.send_message(message.chat.id, "❌ Xato! Iltimos, faqat son kiriting:")
-    
-    def save_transaction_description(self, message):
-        """Tavsifni saqlash va transaksiyani yakunlash"""
-        chat_id = message.chat.id
-        description = message.text if message.text.lower() != 'skip' else ''
-        
-        state = self.user_states()[chat_id]
-        
+    def add_transaction(self, user_id, amount, description, category, trans_type):
+        """Yangi transaksiya qo'shish"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
         c.execute('''INSERT INTO transactions (user_id, amount, description, category, type)
                     VALUES (?, ?, ?, ?, ?)''',
-                 (1, state['amount'], description, state['category'], state['type']))
+                 (user_id, amount, description, category, trans_type))
         conn.commit()
+        transaction_id = c.lastrowid
         conn.close()
-        
-        emoji = "✅" if state['type'] == 'income' else "➖"
-        type_text = "daromad" if state['type'] == 'income' else "xarajat"
-        
-        self.bot.send_message(
-            chat_id,
-            f"{emoji} <b>{type_text.title()} qo'shildi!</b>\n\n"
-            f"💰 Miqdor: <b>{state['amount']:,.0f} so'm</b>\n"
-            f"📁 Kategoriya: {state['category']}\n"
-            f"📝 Tavsif: {description or 'yo\'q'}",
-            parse_mode='HTML'
-        )
-        
-        # Holatni tozalash
-        del self.user_states()[chat_id]
-        self.send_main_menu(message)
+        return transaction_id
     
-    def show_balance(self, message):
-        """Balansni ko'rsatish"""
+    def get_balance(self, user_id):
+        """Foydalanuvchi balansini hisoblash"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
         
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (1,))
+        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
         income = c.fetchone()[0] or 0
         
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (1,))
+        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
         expense = c.fetchone()[0] or 0
         
+        conn.close()
+        return income - expense, income, expense
+    
+    def get_today_stats(self, user_id):
+        """Bugungi statistika"""
+        conn = sqlite3.connect('finance_data.db')
+        c = conn.cursor()
+        
         today = datetime.now().strftime("%Y-%m-%d")
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income' AND date LIKE ?", 
-                 (1, f"{today}%"))
+        c.execute('''SELECT SUM(amount) FROM transactions 
+                    WHERE user_id=? AND type='income' AND date LIKE ?''', 
+                 (user_id, f"{today}%"))
         today_income = c.fetchone()[0] or 0
         
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense' AND date LIKE ?", 
-                 (1, f"{today}%"))
+        c.execute('''SELECT SUM(amount) FROM transactions 
+                    WHERE user_id=? AND type='expense' AND date LIKE ?''', 
+                 (user_id, f"{today}%"))
         today_expense = c.fetchone()[0] or 0
         
         conn.close()
-        
-        balance = income - expense
-        
-        text = (
-            f"💰 <b>SIZNING BALANSINGIZ</b>\n\n"
-            f"💵 Jami balans: <b>{balance:+,.0f} so'm</b>\n\n"
-            f"📊 <b>Bugungi statistika:</b>\n"
-            f"   ➕ Daromad: {today_income:,.0f} so'm\n"
-            f"   ➖ Xarajat: {today_expense:,.0f} so'm\n"
-            f"   📍 Farq: {today_income - today_expense:+,.0f} so'm"
-        )
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back'))
-        
-        self.bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+        return today_income, today_expense
     
-    def show_today(self, message):
-        """Bugungi operatsiyalarni ko'rsatish"""
+    def get_today_transactions(self, user_id):
+        """Bugungi transaksiyalar"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
         
@@ -302,29 +162,14 @@ class FinanceManager:
                     strftime('%H:%M', date) as time 
                     FROM transactions 
                     WHERE user_id=? AND date LIKE ? 
-                    ORDER BY date DESC''', (1, f"{today}%"))
+                    ORDER BY date DESC''', (user_id, f"{today}%"))
         
         transactions = c.fetchall()
         conn.close()
-        
-        if not transactions:
-            text = "📭 Bugun hech qanday operatsiya bo'lmagan."
-        else:
-            text = "📋 <b>BUGUNGI OPERATSIYALAR</b>\n\n"
-            for amount, desc, cat, typ, time in transactions:
-                emoji = "➕" if typ == 'income' else "➖"
-                text += f"{emoji} <b>{amount:,.0f} so'm</b> - {cat}\n"
-                if desc:
-                    text += f"   📝 {desc}\n"
-                text += f"   🕐 {time}\n\n"
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back'))
-        
-        self.bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+        return transactions
     
-    def show_history(self, message):
-        """Operatsiyalar tarixini ko'rsatish"""
+    def get_history(self, user_id, limit=20):
+        """Oxirgi transaksiyalar"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
         
@@ -333,301 +178,23 @@ class FinanceManager:
                     FROM transactions 
                     WHERE user_id=? 
                     ORDER BY date DESC 
-                    LIMIT 20''', (1,))
+                    LIMIT ?''', (user_id, limit))
         
         transactions = c.fetchall()
         conn.close()
-        
-        if not transactions:
-            text = "📭 Hech qanday operatsiya topilmadi."
-        else:
-            text = "📜 <b>SO'NGI 20 OPERATSIYA</b>\n\n"
-            for amount, desc, cat, typ, dt in transactions:
-                emoji = "➕" if typ == 'income' else "➖"
-                text += f"{emoji} <b>{amount:,.0f} so'm</b> - {cat}\n"
-                text += f"   🕐 {dt}\n"
-                if desc:
-                    text += f"   📝 {desc}\n"
-                text += "\n"
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back'))
-        
-        self.bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+        return transactions
     
-    def show_stats(self, message):
-        """Statistikani ko'rsatish"""
+    def get_stats(self, user_id):
+        """Statistika ma'lumotlari"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
         
-        # Umumiy statistika
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (1,))
-        total_income = c.fetchone()[0] or 0
-        
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (1,))
-        total_expense = c.fetchone()[0] or 0
-        
-        # Kategoriyalar bo'yicha
+        # Kategoriyalar bo'yicha xarajatlar
         c.execute('''SELECT category, SUM(amount), COUNT(*) 
                     FROM transactions 
                     WHERE user_id=? AND type='expense' 
                     GROUP BY category 
-                    ORDER BY SUM(amount) DESC''', (1,))
-        expense_cats = c.fetchall()
-        
-        conn.close()
-        
-        text = (
-            f"📊 <b>STATISTIKA</b>\n\n"
-            f"💰 <b>Umumiy:</b>\n"
-            f"   ➕ Jami daromad: {total_income:,.0f} so'm\n"
-            f"   ➖ Jami xarajat: {total_expense:,.0f} so'm\n"
-            f"   💵 Tejam: {total_income - total_expense:+,.0f} so'm\n\n"
-        )
-        
-        if expense_cats:
-            text += "📉 <b>Xarajatlar kategoriyalari:</b>\n"
-            for cat, amount, count in expense_cats:
-                percent = (amount / total_expense * 100) if total_expense > 0 else 0
-                bar = "█" * int(percent / 5)
-                text += f"   {cat}: {amount:,.0f} so'm ({percent:.1f}%)\n"
-                text += f"      {bar} {count} marta\n\n"
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back'))
-        
-        self.bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
-    
-    def delete_transaction(self, message, callback_data):
-        """Transaksiyani o'chirish"""
-        # Bu funksiyani keyinroq qo'shamiz
-        pass
-    
-    # ============ KONSOL INTERFEYSI ============
-    
-    def clear_screen(self):
-        """Konsolni tozalash"""
-        os.system('cls' if os.name == 'nt' else 'clear')
-    
-    def print_header(self):
-        """Header chiqarish"""
-        print(f"{Colors.HEADER}{'='*60}{Colors.END}")
-        print(f"{Colors.BOLD}{Colors.CYAN}💰 MOLIYA HISOBCHISI v1.0{Colors.END}".center(60))
-        print(f"{Colors.HEADER}{'='*60}{Colors.END}")
-        print()
-    
-    def print_menu(self):
-        """Asosiy menyuni chiqarish"""
-        print(f"{Colors.BOLD}📌 ASOSIY MENYU:{Colors.END}")
-        print()
-        print(f"  {Colors.GREEN}1.{Colors.END} ➕ Daromad qo'shish")
-        print(f"  {Colors.FAIL}2.{Colors.END} ➖ Xarajat qo'shish")
-        print(f"  {Colors.CYAN}3.{Colors.END} 📊 Balans ko'rish")
-        print(f"  {Colors.CYAN}4.{Colors.END} 📋 Bugungi operatsiyalar")
-        print(f"  {Colors.CYAN}5.{Colors.END} 📜 Operatsiyalar tarixi")
-        print(f"  {Colors.CYAN}6.{Colors.END} 📈 Statistika")
-        print(f"  {Colors.WARNING}7.{Colors.END} 🗑️  Operatsiyani o'chirish")
-        print(f"  {Colors.WARNING}8.{Colors.END} 🤖 Bot statusi")
-        print(f"  {Colors.FAIL}9.{Colors.END} 🚪 Chiqish")
-        print()
-        print(f"{'='*60}")
-    
-    def add_transaction_console(self, trans_type):
-        """Konsoldan transaksiya qo'shish"""
-        self.clear_screen()
-        self.print_header()
-        
-        type_name = "DAROMAD" if trans_type == 'income' else "XARAJAT"
-        print(f"{Colors.BOLD}➕ {type_name} QO'SHISH{Colors.END}")
-        print()
-        
-        # Kategoriyalarni olish
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        c.execute("SELECT name, icon FROM categories WHERE user_id=? AND type=?", (1, trans_type))
-        categories = c.fetchall()
-        conn.close()
-        
-        print(f"{Colors.BOLD}Kategoriyalar:{Colors.END}")
-        for i, (cat_name, icon) in enumerate(categories, 1):
-            print(f"  {i}. {icon} {cat_name}")
-        print()
-        
-        try:
-            # Kategoriya tanlash
-            cat_choice = int(input("Kategoriya raqamini tanlang: ")) - 1
-            if cat_choice < 0 or cat_choice >= len(categories):
-                print(f"{Colors.FAIL}❌ Noto'g'ri tanlov!{Colors.END}")
-                input("Davom etish uchun Enter bosing...")
-                return
-            
-            category = categories[cat_choice][0]
-            
-            # Miqdor kiritish
-            amount = float(input("💰 Miqdorni kiriting (so'm): ").replace(' ', ''))
-            if amount <= 0:
-                print(f"{Colors.FAIL}❌ Miqdor musbat bo'lishi kerak!{Colors.END}")
-                input("Davom etish uchun Enter bosing...")
-                return
-            
-            # Tavsif kiritish
-            description = input("📝 Tavsif (ixtiyoriy): ").strip()
-            
-            # Saqlash
-            conn = sqlite3.connect('finance_data.db')
-            c = conn.cursor()
-            c.execute('''INSERT INTO transactions (user_id, amount, description, category, type)
-                        VALUES (?, ?, ?, ?, ?)''',
-                     (1, amount, description, category, trans_type))
-            conn.commit()
-            conn.close()
-            
-            emoji = "✅" if trans_type == 'income' else "➖"
-            print(f"\n{Colors.GREEN}{emoji} {type_name} muvaffaqiyatli qo'shildi!{Colors.END}")
-            
-        except ValueError:
-            print(f"{Colors.FAIL}❌ Xato! Iltimos, to'g'ri ma'lumot kiriting.{Colors.END}")
-        except Exception as e:
-            print(f"{Colors.FAIL}❌ Xatolik: {e}{Colors.END}")
-        
-        input("\nDavom etish uchun Enter bosing...")
-    
-    def show_balance_console(self):
-        """Konsolda balansni ko'rsatish"""
-        self.clear_screen()
-        self.print_header()
-        
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        
-        # Umumiy balans
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (1,))
-        total_income = c.fetchone()[0] or 0
-        
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (1,))
-        total_expense = c.fetchone()[0] or 0
-        
-        # Bugungi statistika
-        today = datetime.now().strftime("%Y-%m-%d")
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income' AND date LIKE ?", 
-                 (1, f"{today}%"))
-        today_income = c.fetchone()[0] or 0
-        
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense' AND date LIKE ?", 
-                 (1, f"{today}%"))
-        today_expense = c.fetchone()[0] or 0
-        
-        conn.close()
-        
-        balance = total_income - total_expense
-        
-        print(f"{Colors.BOLD}💰 BALANS MA'LUMOTLARI{Colors.END}")
-        print()
-        print(f"  Jami balans: {Colors.BOLD}{balance:+,.0f} so'm{Colors.END}")
-        print()
-        print(f"  {Colors.GREEN}Jami daromad: {total_income:,.0f} so'm{Colors.END}")
-        print(f"  {Colors.FAIL}Jami xarajat: {total_expense:,.0f} so'm{Colors.END}")
-        print()
-        print(f"{Colors.CYAN}📊 BUGUNGI STATISTIKA:{Colors.END}")
-        print(f"  {Colors.GREEN}➨ Daromad: {today_income:,.0f} so'm{Colors.END}")
-        print(f"  {Colors.FAIL}➨ Xarajat: {today_expense:,.0f} so'm{Colors.END}")
-        print(f"  ➨ Farq: {today_income - today_expense:+,.0f} so'm")
-        
-        input("\nDavom etish uchun Enter bosing...")
-    
-    def show_today_console(self):
-        """Konsolda bugungi operatsiyalarni ko'rsatish"""
-        self.clear_screen()
-        self.print_header()
-        
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        
-        today = datetime.now().strftime("%Y-%m-%d")
-        c.execute('''SELECT amount, description, category, type, 
-                    strftime('%H:%M', date) as time 
-                    FROM transactions 
-                    WHERE user_id=? AND date LIKE ? 
-                    ORDER BY date DESC''', (1, f"{today}%"))
-        
-        transactions = c.fetchall()
-        conn.close()
-        
-        print(f"{Colors.BOLD}📋 BUGUNGI OPERATSIYALAR{Colors.END}")
-        print()
-        
-        if not transactions:
-            print(f"{Colors.WARNING}📭 Bugun hech qanday operatsiya bo'lmagan.{Colors.END}")
-        else:
-            for amount, desc, cat, typ, time in transactions:
-                if typ == 'income':
-                    print(f"  {Colors.GREEN}➕ {amount:,.0f} so'm{Colors.END} - {cat}")
-                else:
-                    print(f"  {Colors.FAIL}➖ {amount:,.0f} so'm{Colors.END} - {cat}")
-                if desc:
-                    print(f"     📝 {desc}")
-                print(f"     🕐 {time}")
-                print()
-        
-        input("\nDavom etish uchun Enter bosing...")
-    
-    def show_history_console(self):
-        """Konsolda operatsiyalar tarixini ko'rsatish"""
-        self.clear_screen()
-        self.print_header()
-        
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        
-        c.execute('''SELECT amount, description, category, type, 
-                    strftime('%d.%m.%Y %H:%M', date) as datetime 
-                    FROM transactions 
-                    WHERE user_id=? 
-                    ORDER BY date DESC 
-                    LIMIT 30''', (1,))
-        
-        transactions = c.fetchall()
-        conn.close()
-        
-        print(f"{Colors.BOLD}📜 SO'NGI 30 OPERATSIYA{Colors.END}")
-        print()
-        
-        if not transactions:
-            print(f"{Colors.WARNING}📭 Hech qanday operatsiya topilmadi.{Colors.END}")
-        else:
-            for amount, desc, cat, typ, dt in transactions:
-                if typ == 'income':
-                    print(f"  {Colors.GREEN}➕ {amount:,.0f} so'm{Colors.END} - {cat}")
-                else:
-                    print(f"  {Colors.FAIL}➖ {amount:,.0f} so'm{Colors.END} - {cat}")
-                print(f"     🕐 {dt}")
-                if desc:
-                    print(f"     📝 {desc}")
-                print()
-        
-        input("\nDavom etish uchun Enter bosing...")
-    
-    def show_stats_console(self):
-        """Konsolda statistikani ko'rsatish"""
-        self.clear_screen()
-        self.print_header()
-        
-        conn = sqlite3.connect('finance_data.db')
-        c = conn.cursor()
-        
-        # Umumiy statistika
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (1,))
-        total_income = c.fetchone()[0] or 0
-        
-        c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (1,))
-        total_expense = c.fetchone()[0] or 0
-        
-        # Kategoriyalar bo'yicha
-        c.execute('''SELECT category, SUM(amount), COUNT(*) 
-                    FROM transactions 
-                    WHERE user_id=? AND type='expense' 
-                    GROUP BY category 
-                    ORDER BY SUM(amount) DESC''', (1,))
+                    ORDER BY SUM(amount) DESC''', (user_id,))
         expense_cats = c.fetchall()
         
         # Oylik statistika
@@ -638,190 +205,502 @@ class FinanceManager:
                     WHERE user_id=?
                     GROUP BY month
                     ORDER BY month DESC
-                    LIMIT 6''', (1,))
+                    LIMIT 6''', (user_id,))
         monthly_stats = c.fetchall()
         
         conn.close()
-        
-        print(f"{Colors.BOLD}📊 STATISTIKA{Colors.END}")
-        print()
-        print(f"{Colors.CYAN}UMUMIY:{Colors.END}")
-        print(f"  {Colors.GREEN}Jami daromad: {total_income:,.0f} so'm{Colors.END}")
-        print(f"  {Colors.FAIL}Jami xarajat: {total_expense:,.0f} so'm{Colors.END}")
-        print(f"  {Colors.BOLD}Tejam: {total_income - total_expense:+,.0f} so'm{Colors.END}")
-        print()
-        
-        if expense_cats:
-            print(f"{Colors.CYAN}XARAJATLAR KATEGORIYALARI:{Colors.END}")
-            for cat, amount, count in expense_cats:
-                percent = (amount / total_expense * 100) if total_expense > 0 else 0
-                bar = "█" * int(percent / 4)
-                print(f"  {cat}:")
-                print(f"    {bar} {amount:,.0f} so'm ({percent:.1f}%) - {count} marta")
-            print()
-        
-        if monthly_stats:
-            print(f"{Colors.CYAN}OXIRGI 6 OY:{Colors.END}")
-            for month, income, expense in monthly_stats:
-                year, month_num = month.split('-')
-                month_names = ['Yan', 'Fev', 'Mar', 'Apr', 'May', 'Iyun',
-                              'Iyul', 'Avg', 'Sen', 'Okt', 'Noy', 'Dek']
-                month_name = month_names[int(month_num) - 1]
-                print(f"  {month_name} {year}: {Colors.GREEN}+{income:,.0f}{Colors.END} | {Colors.FAIL}-{expense:,.0f}{Colors.END} = {income - expense:+,.0f}")
-        
-        input("\nDavom etish uchun Enter bosing...")
+        return expense_cats, monthly_stats
     
-    def delete_transaction_console(self):
-        """Konsoldan operatsiyani o'chirish"""
-        self.clear_screen()
-        self.print_header()
-        
+    def delete_transaction(self, user_id, transaction_id):
+        """Transaksiyani o'chirish"""
+        conn = sqlite3.connect('finance_data.db')
+        c = conn.cursor()
+        c.execute('''DELETE FROM transactions 
+                    WHERE id=? AND user_id=?''', (transaction_id, user_id))
+        success = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+    
+    def get_transactions_for_delete(self, user_id, limit=10):
+        """O'chirish uchun transaksiyalar ro'yxati"""
         conn = sqlite3.connect('finance_data.db')
         c = conn.cursor()
         
         c.execute('''SELECT id, amount, description, category, type, 
-                    strftime('%d.%m.%Y %H:%M', date) as datetime 
+                    strftime('%d.%m %H:%M', date) as datetime 
                     FROM transactions 
                     WHERE user_id=? 
                     ORDER BY date DESC 
-                    LIMIT 20''', (1,))
+                    LIMIT ?''', (user_id, limit))
         
         transactions = c.fetchall()
         conn.close()
+        return transactions
+
+# FinanceBot obyektini yaratish
+finance = FinanceBot()
+
+# ==================== BOT HANDLERLARI ====================
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    """Start komandasi"""
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+    
+    # Foydalanuvchini ro'yxatdan o'tkazish
+    finance.register_user(user_id, username, first_name)
+    
+    # Asosiy menyu
+    show_main_menu(message.chat.id, first_name)
+
+def show_main_menu(chat_id, first_name=None):
+    """Asosiy menyuni ko'rsatish"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    btn1 = types.InlineKeyboardButton("💰 Daromad", callback_data='menu_income')
+    btn2 = types.InlineKeyboardButton("💸 Xarajat", callback_data='menu_expense')
+    btn3 = types.InlineKeyboardButton("📊 Balans", callback_data='menu_balance')
+    btn4 = types.InlineKeyboardButton("📋 Bugun", callback_data='menu_today')
+    btn5 = types.InlineKeyboardButton("📜 Tarix", callback_data='menu_history')
+    btn6 = types.InlineKeyboardButton("📈 Statistika", callback_data='menu_stats')
+    btn7 = types.InlineKeyboardButton("🗑️ O'chirish", callback_data='menu_delete')
+    btn8 = types.InlineKeyboardButton("❓ Yordam", callback_data='menu_help')
+    
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8)
+    
+    welcome_text = (
+        f"👋 Assalomu alaykum, {first_name if first_name else 'foydalanuvchi'}!\n\n"
+        f"💰 Moliya hisobchisi botiga xush kelibsiz!\n\n"
+        f"📌 Quyidagi tugmalardan foydalaning:"
+    )
+    
+    bot.send_message(chat_id, welcome_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    """Callback handler"""
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+    user_id = call.from_user.id
+    
+    try:
+        if call.data == 'menu_income':
+            show_income_categories(chat_id, message_id, user_id)
         
-        if not transactions:
-            print(f"{Colors.WARNING}📭 Hech qanday operatsiya topilmadi.{Colors.END}")
-            input("Davom etish uchun Enter bosing...")
-            return
+        elif call.data == 'menu_expense':
+            show_expense_categories(chat_id, message_id, user_id)
         
-        print(f"{Colors.BOLD}🗑️ OPERATSIYANI O'CHIRISH{Colors.END}")
-        print()
-        print("So'ngi 20 operatsiya:")
-        print()
+        elif call.data == 'menu_balance':
+            show_balance(chat_id, message_id, user_id)
         
-        for i, (tid, amount, desc, cat, typ, dt) in enumerate(transactions, 1):
-            if typ == 'income':
-                print(f"  {i}. {Colors.GREEN}[ID: {tid}] {amount:,.0f} so'm - {cat}{Colors.END}")
-            else:
-                print(f"  {i}. {Colors.FAIL}[ID: {tid}] {amount:,.0f} so'm - {cat}{Colors.END}")
-            print(f"     📅 {dt}")
-            if desc:
-                print(f"     📝 {desc}")
-            print()
+        elif call.data == 'menu_today':
+            show_today(chat_id, message_id, user_id)
         
-        try:
-            choice = input("O'chirmoqchi bo'lgan operatsiya raqamini kiriting (0 - bekor qilish): ")
-            if choice == '0':
-                return
-            
-            idx = int(choice) - 1
-            if 0 <= idx < len(transactions):
-                tid = transactions[idx][0]
+        elif call.data == 'menu_history':
+            show_history(chat_id, message_id, user_id)
+        
+        elif call.data == 'menu_stats':
+            show_stats(chat_id, message_id, user_id)
+        
+        elif call.data == 'menu_delete':
+            show_delete_menu(chat_id, message_id, user_id)
+        
+        elif call.data == 'menu_help':
+            show_help(chat_id, message_id)
+        
+        elif call.data == 'back_to_main':
+            bot.delete_message(chat_id, message_id)
+            show_main_menu(chat_id)
+        
+        elif call.data.startswith('cat_income_'):
+            category = call.data.replace('cat_income_', '')
+            ask_amount(chat_id, message_id, user_id, 'income', category)
+        
+        elif call.data.startswith('cat_expense_'):
+            category = call.data.replace('cat_expense_', '')
+            ask_amount(chat_id, message_id, user_id, 'expense', category)
+        
+        elif call.data.startswith('delete_'):
+            parts = call.data.split('_')
+            transaction_id = int(parts[1])
+            confirm_delete(chat_id, message_id, user_id, transaction_id)
+        
+        elif call.data.startswith('confirm_delete_'):
+            transaction_id = int(call.data.replace('confirm_delete_', ''))
+            execute_delete(chat_id, message_id, user_id, transaction_id)
+        
+        elif call.data == 'cancel_delete':
+            bot.delete_message(chat_id, message_id)
+            show_main_menu(chat_id)
+        
+    except Exception as e:
+        logger.error(f"Callback xatosi: {e}")
+        bot.send_message(chat_id, "❌ Xatolik yuz berdi. Iltimos, qaytadan urinib ko'ring.")
+
+def show_income_categories(chat_id, message_id, user_id):
+    """Daromad kategoriyalarini ko'rsatish"""
+    categories = finance.get_categories(user_id, 'income')
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat_name, icon in categories:
+        callback_data = f"cat_income_{cat_name}"
+        markup.add(types.InlineKeyboardButton(f"{icon} {cat_name}", callback_data=callback_data))
+    
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(
+        "💰 Daromad kategoriyasini tanlang:",
+        chat_id,
+        message_id,
+        reply_markup=markup
+    )
+
+def show_expense_categories(chat_id, message_id, user_id):
+    """Xarajat kategoriyalarini ko'rsatish"""
+    categories = finance.get_categories(user_id, 'expense')
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for cat_name, icon in categories:
+        callback_data = f"cat_expense_{cat_name}"
+        markup.add(types.InlineKeyboardButton(f"{icon} {cat_name}", callback_data=callback_data))
+    
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(
+        "💸 Xarajat kategoriyasini tanlang:",
+        chat_id,
+        message_id,
+        reply_markup=markup
+    )
+
+def ask_amount(chat_id, message_id, user_id, trans_type, category):
+    """Miqdorni so'rash"""
+    user_states[user_id] = {
+        'step': 'waiting_amount',
+        'type': trans_type,
+        'category': category
+    }
+    
+    text = f"📝 {category} uchun miqdorni kiriting (so'm):"
+    bot.delete_message(chat_id, message_id)
+    msg = bot.send_message(chat_id, text)
+    
+    # Xabarni saqlash keyin o'chirish uchun
+    user_states[user_id]['last_message_id'] = msg.message_id
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    """Xabarlarni qayta ishlash"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    text = message.text.strip()
+    
+    # Foydalanuvchi holatini tekshirish
+    if user_id in user_states:
+        state = user_states[user_id]
+        
+        if state.get('step') == 'waiting_amount':
+            try:
+                amount = float(text.replace(' ', ''))
+                if amount <= 0:
+                    bot.send_message(chat_id, "❌ Miqdor musbat son bo'lishi kerak!")
+                    return
                 
-                confirm = input(f"Haqiqatan ham bu operatsiyani o'chirmoqchimisiz? (ha/yo'q): ")
-                if confirm.lower() == 'ha':
-                    conn = sqlite3.connect('finance_data.db')
-                    c = conn.cursor()
-                    c.execute("DELETE FROM transactions WHERE id=? AND user_id=?", (tid, 1))
-                    conn.commit()
-                    conn.close()
-                    
-                    print(f"{Colors.GREEN}✅ Operatsiya muvaffaqiyatli o'chirildi!{Colors.END}")
-                else:
-                    print(f"{Colors.WARNING}❌ Bekor qilindi.{Colors.END}")
-            else:
-                print(f"{Colors.FAIL}❌ Noto'g'ri tanlov!{Colors.END}")
+                state['amount'] = amount
+                state['step'] = 'waiting_description'
+                
+                bot.send_message(chat_id, "📝 Tavsif kiriting (yoki /skip ni bosing):")
+                
+            except ValueError:
+                bot.send_message(chat_id, "❌ Xato! Iltimos, faqat son kiriting (masalan: 50000):")
         
-        except ValueError:
-            print(f"{Colors.FAIL}❌ Noto'g'ri format!{Colors.END}")
-        except Exception as e:
-            print(f"{Colors.FAIL}❌ Xatolik: {e}{Colors.END}")
-        
-        input("\nDavom etish uchun Enter bosing...")
-    
-    def show_bot_status(self):
-        """Bot statusini ko'rsatish"""
-        self.clear_screen()
-        self.print_header()
-        
-        print(f"{Colors.BOLD}🤖 TELEGRAM BOT STATUSI{Colors.END}")
-        print()
-        
-        if self.bot:
-            try:
-                bot_info = self.bot.get_me()
-                print(f"  {Colors.GREEN}✅ Bot faol{Colors.END}")
-                print(f"  🤖 Nomi: {bot_info.first_name}")
-                print(f"  🔑 Username: @{bot_info.username}")
-                print(f"  🆔 ID: {bot_info.id}")
-                print(f"  📦 Token: {self.bot_token[:10]}...{self.bot_token[-5:]}")
-            except:
-                print(f"  {Colors.FAIL}❌ Bot ishlamayapti{Colors.END}")
-                print(f"  📦 Token: {self.bot_token[:10]}...{self.bot_token[-5:]}")
-        else:
-            print(f"  {Colors.FAIL}❌ Bot ishga tushmagan{Colors.END}")
-            print(f"  📦 Token: {self.bot_token[:10]}...{self.bot_token[-5:]}")
-        
-        print()
-        print(f"{Colors.CYAN}📌 Botdan foydalanish:{Colors.END}")
-        print("  1. Telegramda @{} ni qidiring".format(self.bot.get_me().username if self.bot else "bot"))
-        print("  2. /start buyrug'ini yuboring")
-        print("  3. Tugmalar orqali operatsiyalarni bajaring")
-        
-        input("\nDavom etish uchun Enter bosing...")
-    
-    def run_bot_thread(self):
-        """Botni alohida threadda ishga tushirish"""
-        if self.bot:
-            try:
-                self.bot.infinity_polling()
-            except Exception as e:
-                print(f"{Colors.FAIL}❌ Bot xatosi: {e}{Colors.END}")
-    
-    def run(self):
-        """Asosiy dastur"""
-        # Botni alohida threadda ishga tushirish
-        if self.bot:
-            bot_thread = threading.Thread(target=self.run_bot_thread, daemon=True)
-            bot_thread.start()
-        
-        while True:
-            self.clear_screen()
-            self.print_header()
-            self.print_menu()
+        elif state.get('step') == 'waiting_description':
+            description = text if text != '/skip' else ''
             
-            choice = input(f"{Colors.BOLD}Tanlovingiz: {Colors.END}")
+            # Transaksiyani saqlash
+            finance.add_transaction(
+                user_id,
+                state['amount'],
+                description,
+                state['category'],
+                state['type']
+            )
             
-            if choice == '1':
-                self.add_transaction_console('income')
-            elif choice == '2':
-                self.add_transaction_console('expense')
-            elif choice == '3':
-                self.show_balance_console()
-            elif choice == '4':
-                self.show_today_console()
-            elif choice == '5':
-                self.show_history_console()
-            elif choice == '6':
-                self.show_stats_console()
-            elif choice == '7':
-                self.delete_transaction_console()
-            elif choice == '8':
-                self.show_bot_status()
-            elif choice == '9':
-                print(f"\n{Colors.GREEN}👋 Xayr!{Colors.END}")
-                sys.exit(0)
-            else:
-                print(f"{Colors.FAIL}❌ Noto'g'ri tanlov!{Colors.END}")
-                time.sleep(1)
+            emoji = "✅" if state['type'] == 'income' else "➖"
+            type_text = "daromad" if state['type'] == 'income' else "xarajat"
+            
+            bot.send_message(
+                chat_id,
+                f"{emoji} <b>{type_text.title()} qo'shildi!</b>\n\n"
+                f"💰 Miqdor: <b>{state['amount']:,.0f} so'm</b>\n"
+                f"📁 Kategoriya: {state['category']}\n"
+                f"📝 Tavsif: {description if description else 'yo\'q'}",
+                parse_mode='HTML'
+            )
+            
+            # Holatni tozalash
+            del user_states[user_id]
+            
+            # Asosiy menyuni ko'rsatish
+            show_main_menu(chat_id)
+    
+    else:
+        # Agar holat bo'lmasa, start komandasini eslatish
+        bot.send_message(chat_id, "❌ Noto'g'ri buyruq. /start ni bosing.")
+
+@bot.message_handler(commands=['skip'])
+def handle_skip(message):
+    """Skip komandasi"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if user_id in user_states and user_states[user_id].get('step') == 'waiting_description':
+        description = ''
+        
+        state = user_states[user_id]
+        
+        # Transaksiyani saqlash
+        finance.add_transaction(
+            user_id,
+            state['amount'],
+            description,
+            state['category'],
+            state['type']
+        )
+        
+        emoji = "✅" if state['type'] == 'income' else "➖"
+        type_text = "daromad" if state['type'] == 'income' else "xarajat"
+        
+        bot.send_message(
+            chat_id,
+            f"{emoji} <b>{type_text.title()} qo'shildi!</b>\n\n"
+            f"💰 Miqdor: <b>{state['amount']:,.0f} so'm</b>\n"
+            f"📁 Kategoriya: {state['category']}",
+            parse_mode='HTML'
+        )
+        
+        # Holatni tozalash
+        del user_states[user_id]
+        
+        # Asosiy menyuni ko'rsatish
+        show_main_menu(chat_id)
+
+def show_balance(chat_id, message_id, user_id):
+    """Balansni ko'rsatish"""
+    balance, total_income, total_expense = finance.get_balance(user_id)
+    today_income, today_expense = finance.get_today_stats(user_id)
+    
+    text = (
+        f"💰 <b>SIZNING BALANSINGIZ</b>\n\n"
+        f"💵 Jami balans: <b>{balance:+,.0f} so'm</b>\n\n"
+        f"📊 <b>Bugungi statistika:</b>\n"
+        f"   ➕ Daromad: {today_income:,.0f} so'm\n"
+        f"   ➖ Xarajat: {today_expense:,.0f} so'm\n"
+        f"   📍 Farq: {today_income - today_expense:+,.0f} so'm\n\n"
+        f"📈 <b>Jami:</b>\n"
+        f"   ➕ Jami daromad: {total_income:,.0f} so'm\n"
+        f"   ➖ Jami xarajat: {total_expense:,.0f} so'm"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+
+def show_today(chat_id, message_id, user_id):
+    """Bugungi operatsiyalarni ko'rsatish"""
+    transactions = finance.get_today_transactions(user_id)
+    
+    if not transactions:
+        text = "📭 Bugun hech qanday operatsiya bo'lmagan."
+    else:
+        text = "📋 <b>BUGUNGI OPERATSIYALAR</b>\n\n"
+        for amount, desc, cat, typ, time in transactions:
+            emoji = "➕" if typ == 'income' else "➖"
+            color = "✅" if typ == 'income' else "❌"
+            text += f"{emoji} <b>{amount:,.0f} so'm</b> - {cat}\n"
+            if desc:
+                text += f"   📝 {desc}\n"
+            text += f"   🕐 {time}\n\n"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+
+def show_history(chat_id, message_id, user_id):
+    """Operatsiyalar tarixini ko'rsatish"""
+    transactions = finance.get_history(user_id, 20)
+    
+    if not transactions:
+        text = "📭 Hech qanday operatsiya topilmadi."
+    else:
+        text = "📜 <b>SO'NGI 20 OPERATSIYA</b>\n\n"
+        for amount, desc, cat, typ, dt in transactions:
+            emoji = "➕" if typ == 'income' else "➖"
+            text += f"{emoji} <b>{amount:,.0f} so'm</b> - {cat}\n"
+            text += f"   🕐 {dt}\n"
+            if desc:
+                text += f"   📝 {desc}\n"
+            text += "\n"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+
+def show_stats(chat_id, message_id, user_id):
+    """Statistikani ko'rsatish"""
+    balance, total_income, total_expense = finance.get_balance(user_id)
+    expense_cats, monthly_stats = finance.get_stats(user_id)
+    
+    text = (
+        f"📊 <b>STATISTIKA</b>\n\n"
+        f"💰 <b>Umumiy:</b>\n"
+        f"   ➕ Jami daromad: {total_income:,.0f} so'm\n"
+        f"   ➖ Jami xarajat: {total_expense:,.0f} so'm\n"
+        f"   💵 Tejam: {total_income - total_expense:+,.0f} so'm\n\n"
+    )
+    
+    if expense_cats:
+        text += "📉 <b>Xarajatlar kategoriyalari:</b>\n"
+        for cat, amount, count in expense_cats:
+            percent = (amount / total_expense * 100) if total_expense > 0 else 0
+            bar = "█" * int(percent / 5)
+            text += f"   {cat}: {amount:,.0f} so'm ({percent:.1f}%)\n"
+            text += f"      {bar} {count} marta\n\n"
+    
+    if monthly_stats:
+        text += "📅 <b>Oxirgi 6 oy:</b>\n"
+        for month, income, expense in monthly_stats:
+            year, month_num = month.split('-')
+            month_names = ['Yan', 'Fev', 'Mar', 'Apr', 'May', 'Iyun',
+                          'Iyul', 'Avg', 'Sen', 'Okt', 'Noy', 'Dek']
+            month_name = month_names[int(month_num) - 1]
+            text += f"   {month_name} {year}: +{income:,.0f} | -{expense:,.0f} = {income - expense:+,.0f}\n"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+
+def show_delete_menu(chat_id, message_id, user_id):
+    """O'chirish menyusini ko'rsatish"""
+    transactions = finance.get_transactions_for_delete(user_id, 10)
+    
+    if not transactions:
+        bot.edit_message_text(
+            "📭 O'chirish uchun operatsiyalar mavjud emas.",
+            chat_id,
+            message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main')
+            )
+        )
+        return
+    
+    text = "🗑️ <b>O'CHIRISH UCHUN OPERATSIYA TANLANG</b>\n\n"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    
+    for tid, amount, desc, cat, typ, dt in transactions:
+        emoji = "➕" if typ == 'income' else "➖"
+        btn_text = f"{emoji} {amount:,.0f} so'm - {cat} ({dt})"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"delete_{tid}"))
+    
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+
+def confirm_delete(chat_id, message_id, user_id, transaction_id):
+    """O'chirishni tasdiqlash"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Ha", callback_data=f"confirm_delete_{transaction_id}"),
+        types.InlineKeyboardButton("❌ Yo'q", callback_data='cancel_delete')
+    )
+    
+    bot.edit_message_text(
+        "⚠️ Bu operatsiyani o'chirmoqchimisiz?",
+        chat_id,
+        message_id,
+        reply_markup=markup
+    )
+
+def execute_delete(chat_id, message_id, user_id, transaction_id):
+    """Transaksiyani o'chirish"""
+    success = finance.delete_transaction(user_id, transaction_id)
+    
+    if success:
+        text = "✅ Operatsiya muvaffaqiyatli o'chirildi!"
+    else:
+        text = "❌ Operatsiyani o'chirishda xatolik yuz berdi."
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Menyu", callback_data='back_to_main'))
+    
+    bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
+
+def show_help(chat_id, message_id):
+    """Yordam ma'lumotlarini ko'rsatish"""
+    help_text = (
+        "❓ <b>YORDAM</b>\n\n"
+        "💰 <b>Daromad qo'shish:</b>\n"
+        "   Daromad tugmasini bosing -> kategoriya tanlang -> miqdor kiriting\n\n"
+        "💸 <b>Xarajat qo'shish:</b>\n"
+        "   Xarajat tugmasini bosing -> kategoriya tanlang -> miqdor kiriting\n\n"
+        "📊 <b>Balans:</b>\n"
+        "   Jami balans va bugungi statistikani ko'rish\n\n"
+        "📋 <b>Bugun:</b>\n"
+        "   Bugungi barcha operatsiyalar ro'yxati\n\n"
+        "📜 <b>Tarix:</b>\n"
+        "   So'nggi 20 operatsiya\n\n"
+        "📈 <b>Statistika:</b>\n"
+        "   Kategoriyalar bo'yicha tahlil\n\n"
+        "🗑️ <b>O'chirish:</b>\n"
+        "   Xato kiritilgan operatsiyani o'chirish\n\n"
+        "🤖 <b>Bot haqida:</b>\n"
+        "   Versiya: 1.0\n"
+        "   Yaratilgan: 2024"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Orqaga", callback_data='back_to_main'))
+    
+    bot.edit_message_text(help_text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    """Help komandasi"""
+    show_help(message.chat.id, message.message_id)
+
+# ==================== BOTNI ISHGA TUSHIRISH ====================
+
+def main():
+    """Asosiy funksiya"""
+    print("=" * 50)
+    print("💰 MOLIYA HISOBCHISI BOTI")
+    print("=" * 50)
+    print(f"🤖 Bot token: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:]}")
+    print("✅ Bot ishga tushmoqda...")
+    
+    try:
+        bot_info = bot.get_me()
+        print(f"✅ Bot nomi: {bot_info.first_name}")
+        print(f"✅ Bot username: @{bot_info.username}")
+        print("=" * 50)
+        print("🟢 Bot ishlamoqda...")
+        print("=" * 50)
+        
+        # Botni ishga tushirish
+        bot.infinity_polling()
+        
+    except Exception as e:
+        print(f"❌ Xatolik: {e}")
+        print("⚠️ Bot to'xtatildi.")
 
 if __name__ == "__main__":
-    try:
-        app = FinanceManager()
-        app.run()
-    except KeyboardInterrupt:
-        print(f"\n{Colors.GREEN}👋 Dastur to'xtatildi.{Colors.END}")
-        sys.exit(0)
-    except Exception as e:
-        print(f"{Colors.FAIL}❌ Xatolik: {e}{Colors.END}")
-        input("Davom etish uchun Enter bosing...")
+    main()
