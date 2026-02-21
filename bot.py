@@ -1192,7 +1192,7 @@ def start(message):
     conn.close()
     
     # Get railway URL
-    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'https://webhook.site/3c9c1cb7-2669-4f62-a235-d4d638b2314b')
+    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'webhook-processor-production-6f0b.up.railway.app')
     if not railway_url:
         railway_url = request.host_url.rstrip('/') if request else ''
     
@@ -1270,7 +1270,7 @@ def webhook():
 # Main
 if __name__ == '__main__':
     # Setup webhook for production
-    railway_url = os.environ.get('https://webhook.site/3c9c1cb7-2669-4f62-a235-d4d638b2314b')
+    railway_url = os.environ.get('webhook-processor-production-6f0b.up.railway.app')
     if railway_url:
         webhook_url = f"https://{railway_url}/webhook"
         bot.remove_webhook()
