@@ -1,20 +1,68 @@
+import os
 import telebot
 from telebot import types
 import sqlite3
-from datetime import datetime
-import json
-from flask import Flask, request, render_template_string, redirect, url_for
+from datetime import datetime, timedelta
+import logging
+from flask import Flask, request, render_template_string, jsonify
 import threading
+import time
 
-# Bot tokeni
-BOT_TOKEN = "8418511713:AAFkb9zPXNqdwaw4sb3AmjSLQkTKeBXRMVM"
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Bot token - Railwayda environment variable orqali beriladi
+BOT_TOKEN = os.environ.get('BOT_TOKEN', "8418511713:AAFkb9zPXNqdwaw4sb3AmjSLQkTKeBXRMVM")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Flask web app
+# Flask app
 app = Flask(__name__)
 
-# HTML shablonlar
-WEB_APP_HTML = '''
+# Database
+def get_db():
+    conn = sqlite3.connect('finance.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_database():
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                (user_id INTEGER PRIMARY KEY,
+                 username TEXT,
+                 first_name TEXT,
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Transactions table
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id INTEGER,
+                 amount REAL,
+                 description TEXT,
+                 category TEXT,
+                 type TEXT,
+                 date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Categories table
+    c.execute('''CREATE TABLE IF NOT EXISTS categories
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 user_id INTEGER,
+                 name TEXT,
+                 type TEXT,
+                 icon TEXT)''')
+    
+    conn.commit()
+    conn.close()
+    logger.info("Database initialized")
+
+# Initialize database
+init_database()
+
+# HTML Templates
+MAIN_HTML = '''
 <!DOCTYPE html>
 <html lang="uz">
 <head>
@@ -26,7 +74,7 @@ WEB_APP_HTML = '''
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         }
         
         body {
@@ -36,7 +84,7 @@ WEB_APP_HTML = '''
         }
         
         .container {
-            max-width: 500px;
+            max-width: 600px;
             margin: 0 auto;
         }
         
@@ -45,45 +93,36 @@ WEB_APP_HTML = '''
             border-radius: 20px;
             padding: 25px;
             margin-bottom: 20px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             animation: slideUp 0.5s ease;
         }
         
         @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
-        h1 {
-            color: #333;
-            font-size: 24px;
-            margin-bottom: 20px;
+        .header {
             display: flex;
             align-items: center;
-            gap: 10px;
+            justify-content: space-between;
+            margin-bottom: 20px;
         }
         
-        h2 {
-            color: #666;
-            font-size: 18px;
-            margin-bottom: 15px;
+        .header h1 {
+            font-size: 24px;
+            color: #333;
         }
         
         .balance-card {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            border-radius: 15px;
+            border-radius: 20px;
             padding: 25px;
             margin-bottom: 20px;
         }
         
-        .balance-title {
+        .balance-label {
             font-size: 14px;
             opacity: 0.9;
             margin-bottom: 10px;
@@ -92,13 +131,12 @@ WEB_APP_HTML = '''
         .balance-amount {
             font-size: 36px;
             font-weight: bold;
-            margin-bottom: 10px;
+            margin-bottom: 15px;
         }
         
         .balance-stats {
             display: flex;
             justify-content: space-between;
-            font-size: 14px;
         }
         
         .stat-item {
@@ -106,180 +144,13 @@ WEB_APP_HTML = '''
         }
         
         .stat-value {
-            font-weight: bold;
             font-size: 18px;
-        }
-        
-        .form-group {
-            margin-bottom: 20px;
-        }
-        
-        label {
-            display: block;
-            margin-bottom: 8px;
-            color: #333;
-            font-weight: 500;
-        }
-        
-        input, select, textarea {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 12px;
-            font-size: 16px;
-            transition: all 0.3s;
-        }
-        
-        input:focus, select:focus, textarea:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        .btn {
-            width: 100%;
-            padding: 16px;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-        
-        .btn-success {
-            background: #28a745;
-            color: white;
-        }
-        
-        .btn-success:hover {
-            background: #218838;
-        }
-        
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-        
-        .btn-danger:hover {
-            background: #c82333;
-        }
-        
-        .btn-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 20px;
-        }
-        
-        .btn-group .btn {
-            flex: 1;
-        }
-        
-        .transaction-item {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 15px;
-            margin-bottom: 10px;
-            border-left: 4px solid;
-            transition: transform 0.2s;
-        }
-        
-        .transaction-item:hover {
-            transform: translateX(5px);
-        }
-        
-        .transaction-income {
-            border-left-color: #28a745;
-        }
-        
-        .transaction-expense {
-            border-left-color: #dc3545;
-        }
-        
-        .transaction-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 8px;
-        }
-        
-        .transaction-amount {
             font-weight: bold;
-            font-size: 18px;
         }
         
-        .transaction-category {
-            color: #666;
-        }
-        
-        .transaction-date {
-            color: #999;
+        .stat-label {
             font-size: 12px;
-        }
-        
-        .transaction-desc {
-            color: #666;
-            font-size: 14px;
-        }
-        
-        .stats-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-bottom: 20px;
-        }
-        
-        .stats-card {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 15px;
-            text-align: center;
-        }
-        
-        .stats-card h3 {
-            color: #666;
-            font-size: 14px;
-            margin-bottom: 10px;
-        }
-        
-        .stats-card .value {
-            font-size: 24px;
-            font-weight: bold;
-            color: #333;
-        }
-        
-        .category-progress {
-            margin-bottom: 15px;
-        }
-        
-        .category-name {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 5px;
-        }
-        
-        .progress-bar {
-            width: 100%;
-            height: 8px;
-            background: #e0e0e0;
-            border-radius: 4px;
-            overflow: hidden;
-        }
-        
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #667eea, #764ba2);
-            border-radius: 4px;
-            transition: width 0.3s;
+            opacity: 0.8;
         }
         
         .menu-grid {
@@ -301,7 +172,7 @@ WEB_APP_HTML = '''
         
         .menu-item:hover {
             transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
             border-color: #667eea;
         }
         
@@ -315,104 +186,154 @@ WEB_APP_HTML = '''
             color: #333;
         }
         
-        .success-message {
-            background: #d4edda;
-            color: #155724;
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            text-align: center;
-            animation: fadeIn 0.5s;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-        }
-        
-        .text-center {
-            text-align: center;
-        }
-        
-        .mt-20 {
+        .transactions-list {
             margin-top: 20px;
         }
         
-        .delete-btn {
-            background: #dc3545;
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 12px;
+        .transaction-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin-bottom: 10px;
+            border-left: 4px solid;
         }
+        
+        .transaction-income {
+            border-left-color: #28a745;
+        }
+        
+        .transaction-expense {
+            border-left-color: #dc3545;
+        }
+        
+        .transaction-info {
+            flex: 1;
+        }
+        
+        .transaction-category {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .transaction-desc {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .transaction-amount {
+            font-weight: bold;
+            font-size: 16px;
+        }
+        
+        .transaction-date {
+            font-size: 11px;
+            color: #999;
+            margin-top: 5px;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 100%;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        .text-success { color: #28a745; }
+        .text-danger { color: #dc3545; }
+        .text-center { text-align: center; }
+        .mt-20 { margin-top: 20px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="card">
-            <h1>💰 Moliya Hisobchisi</h1>
-            <p>User ID: {{ user_id }}</p>
+            <div class="header">
+                <h1>💰 Moliya Hisobchisi</h1>
+                <span>User: {{ user_id }}</span>
+            </div>
         </div>
         
         <div class="balance-card">
-            <div class="balance-title">Jami balans</div>
+            <div class="balance-label">Jami balans</div>
             <div class="balance-amount">{{ "{:,.0f}".format(balance) }} so'm</div>
             <div class="balance-stats">
                 <div class="stat-item">
-                    <div>Daromad</div>
-                    <div class="stat-value" style="color: #28a745;">+{{ "{:,.0f}".format(today_income) }}</div>
+                    <div class="stat-value text-success">+{{ "{:,.0f}".format(today_income) }}</div>
+                    <div class="stat-label">Bugungi daromad</div>
                 </div>
                 <div class="stat-item">
-                    <div>Xarajat</div>
-                    <div class="stat-value" style="color: #dc3545;">-{{ "{:,.0f}".format(today_expense) }}</div>
+                    <div class="stat-value text-danger">-{{ "{:,.0f}".format(today_expense) }}</div>
+                    <div class="stat-label">Bugungi xarajat</div>
                 </div>
             </div>
         </div>
         
         <div class="menu-grid">
-            <div class="menu-item" onclick="location.href='/webapp/income/{{ user_id }}'">
+            <div class="menu-item" onclick="location.href='/income/{{ user_id }}'">
                 <div class="menu-icon">💰</div>
                 <div class="menu-title">Daromad</div>
             </div>
-            <div class="menu-item" onclick="location.href='/webapp/expense/{{ user_id }}'">
+            <div class="menu-item" onclick="location.href='/expense/{{ user_id }}'">
                 <div class="menu-icon">💸</div>
                 <div class="menu-title">Xarajat</div>
             </div>
-            <div class="menu-item" onclick="location.href='/webapp/history/{{ user_id }}'">
+            <div class="menu-item" onclick="location.href='/history/{{ user_id }}'">
                 <div class="menu-icon">📜</div>
                 <div class="menu-title">Tarix</div>
             </div>
-            <div class="menu-item" onclick="location.href='/webapp/stats/{{ user_id }}'">
+            <div class="menu-item" onclick="location.href='/stats/{{ user_id }}'">
                 <div class="menu-icon">📊</div>
                 <div class="menu-title">Statistika</div>
             </div>
         </div>
         
         <div class="card">
-            <h2>📋 Oxirgi operatsiyalar</h2>
-            {% for t in transactions %}
-            <div class="transaction-item {% if t.type == 'income' %}transaction-income{% else %}transaction-expense{% endif %}">
-                <div class="transaction-header">
-                    <span class="transaction-category">{{ t.category }}</span>
-                    <span class="transaction-amount {% if t.type == 'income' %}text-success{% else %}text-danger{% endif %}">
-                        {% if t.type == 'income' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(t.amount) }} so'm
-                    </span>
+            <h3>📋 Oxirgi operatsiyalar</h3>
+            <div class="transactions-list">
+                {% for t in transactions %}
+                <div class="transaction-item {% if t.type == 'income' %}transaction-income{% else %}transaction-expense{% endif %}">
+                    <div class="transaction-info">
+                        <div class="transaction-category">{{ t.category }}</div>
+                        {% if t.description %}
+                        <div class="transaction-desc">{{ t.description }}</div>
+                        {% endif %}
+                        <div class="transaction-date">{{ t.date }}</div>
+                    </div>
+                    <div class="transaction-amount {% if t.type == 'income' %}text-success{% else %}text-danger{% endif %}">
+                        {% if t.type == 'income' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(t.amount) }}
+                    </div>
                 </div>
-                {% if t.description %}
-                <div class="transaction-desc">{{ t.description }}</div>
-                {% endif %}
-                <div class="transaction-date">{{ t.date }}</div>
+                {% endfor %}
             </div>
-            {% endfor %}
         </div>
+        
+        <button class="btn btn-primary" onclick="location.href='/'">
+            🔄 Yangilash
+        </button>
     </div>
 </body>
 </html>
 '''
 
-ADD_TRANSACTION_HTML = '''
+ADD_HTML = '''
 <!DOCTYPE html>
 <html lang="uz">
 <head>
@@ -424,7 +345,7 @@ ADD_TRANSACTION_HTML = '''
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         }
         
         body {
@@ -442,19 +363,13 @@ ADD_TRANSACTION_HTML = '''
             background: white;
             border-radius: 20px;
             padding: 30px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             animation: slideUp 0.5s ease;
         }
         
         @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
         h1 {
@@ -492,8 +407,7 @@ ADD_TRANSACTION_HTML = '''
         }
         
         .btn {
-            width: 100%;
-            padding: 16px;
+            padding: 15px 30px;
             border: none;
             border-radius: 12px;
             font-size: 16px;
@@ -505,16 +419,12 @@ ADD_TRANSACTION_HTML = '''
         .btn-primary {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+            width: 100%;
         }
         
         .btn-primary:hover {
             transform: translateY(-2px);
             box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }
-        
-        .btn-success {
-            background: #28a745;
-            color: white;
         }
         
         .btn-secondary {
@@ -539,6 +449,17 @@ ADD_TRANSACTION_HTML = '''
             border-radius: 10px;
             margin-bottom: 20px;
             text-align: center;
+        }
+        
+        .back-btn {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        .back-btn a {
+            color: white;
+            text-decoration: none;
+            font-size: 14px;
         }
     </style>
 </head>
@@ -574,10 +495,14 @@ ADD_TRANSACTION_HTML = '''
                 </div>
                 
                 <div class="btn-group">
-                    <button type="submit" class="btn btn-primary">Saqlash</button>
-                    <button type="button" class="btn btn-secondary" onclick="location.href='/webapp/{{ user_id }}'">Bekor qilish</button>
+                    <button type="submit" class="btn btn-primary">💾 Saqlash</button>
+                    <button type="button" class="btn btn-secondary" onclick="location.href='/user/{{ user_id }}'">❌ Bekor qilish</button>
                 </div>
             </form>
+        </div>
+        
+        <div class="back-btn">
+            <a href="/user/{{ user_id }}">🔙 Orqaga qaytish</a>
         </div>
     </div>
 </body>
@@ -596,7 +521,7 @@ HISTORY_HTML = '''
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         }
         
         body {
@@ -615,19 +540,13 @@ HISTORY_HTML = '''
             border-radius: 20px;
             padding: 25px;
             margin-bottom: 20px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             animation: slideUp 0.5s ease;
         }
         
         @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
         h1 {
@@ -638,17 +557,36 @@ HISTORY_HTML = '''
             gap: 10px;
         }
         
-        .transaction-item {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 15px;
-            margin-bottom: 10px;
-            border-left: 4px solid;
-            transition: transform 0.2s;
+        .filter-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
         }
         
-        .transaction-item:hover {
-            transform: translateX(5px);
+        .filter-btn {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        
+        .filter-btn.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .transaction-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            margin-bottom: 10px;
+            border-left: 4px solid;
         }
         
         .transaction-income {
@@ -659,41 +597,46 @@ HISTORY_HTML = '''
             border-left-color: #dc3545;
         }
         
-        .transaction-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 8px;
+        .transaction-info {
+            flex: 1;
+        }
+        
+        .transaction-category {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .transaction-desc {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
         }
         
         .transaction-amount {
             font-weight: bold;
-            font-size: 18px;
-        }
-        
-        .transaction-category {
-            color: #666;
+            font-size: 16px;
         }
         
         .transaction-date {
+            font-size: 11px;
             color: #999;
-            font-size: 12px;
+            margin-top: 5px;
         }
         
-        .transaction-desc {
-            color: #666;
-            font-size: 14px;
-        }
+        .text-success { color: #28a745; }
+        .text-danger { color: #dc3545; }
         
         .btn {
             padding: 12px 24px;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.3s;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+            width: 100%;
         }
         
         .btn:hover {
@@ -707,26 +650,52 @@ HISTORY_HTML = '''
         <div class="card">
             <h1>📜 Operatsiyalar tarixi</h1>
             
-            {% for t in transactions %}
-            <div class="transaction-item {% if t.type == 'income' %}transaction-income{% else %}transaction-expense{% endif %}">
-                <div class="transaction-header">
-                    <span class="transaction-category">{{ t.category }}</span>
-                    <span class="transaction-amount {% if t.type == 'income' %}text-success{% else %}text-danger{% endif %}">
-                        {% if t.type == 'income' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(t.amount) }} so'm
-                    </span>
-                </div>
-                {% if t.description %}
-                <div class="transaction-desc">{{ t.description }}</div>
-                {% endif %}
-                <div class="transaction-date">{{ t.date }}</div>
+            <div class="filter-buttons">
+                <button class="filter-btn" onclick="filterTransactions('all')">Hammasi</button>
+                <button class="filter-btn" onclick="filterTransactions('income')">Daromad</button>
+                <button class="filter-btn" onclick="filterTransactions('expense')">Xarajat</button>
             </div>
-            {% endfor %}
             
-            <button class="btn" style="width: 100%; margin-top: 20px;" onclick="location.href='/webapp/{{ user_id }}'">
+            <div id="transactions-list">
+                {% for t in transactions %}
+                <div class="transaction-item {% if t.type == 'income' %}transaction-income{% else %}transaction-expense{% endif %}" data-type="{{ t.type }}">
+                    <div class="transaction-info">
+                        <div class="transaction-category">{{ t.category }}</div>
+                        {% if t.description %}
+                        <div class="transaction-desc">{{ t.description }}</div>
+                        {% endif %}
+                        <div class="transaction-date">{{ t.date }}</div>
+                    </div>
+                    <div class="transaction-amount {% if t.type == 'income' %}text-success{% else %}text-danger{% endif %}">
+                        {% if t.type == 'income' %}+{% else %}-{% endif %}{{ "{:,.0f}".format(t.amount) }}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <button class="btn" style="margin-top: 20px;" onclick="location.href='/user/{{ user_id }}'">
                 🔙 Orqaga
             </button>
         </div>
     </div>
+    
+    <script>
+        function filterTransactions(type) {
+            const items = document.querySelectorAll('.transaction-item');
+            const buttons = document.querySelectorAll('.filter-btn');
+            
+            buttons.forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            items.forEach(item => {
+                if (type === 'all' || item.dataset.type === type) {
+                    item.style.display = 'flex';
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+        }
+    </script>
 </body>
 </html>
 '''
@@ -743,7 +712,7 @@ STATS_HTML = '''
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
         }
         
         body {
@@ -762,27 +731,18 @@ STATS_HTML = '''
             border-radius: 20px;
             padding: 25px;
             margin-bottom: 20px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
             animation: slideUp 0.5s ease;
         }
         
         @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(20px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
         h1 {
             color: #333;
             margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
         }
         
         .stats-grid {
@@ -800,18 +760,18 @@ STATS_HTML = '''
             text-align: center;
         }
         
-        .stats-card h3 {
+        .stats-label {
             font-size: 14px;
             opacity: 0.9;
             margin-bottom: 10px;
         }
         
-        .stats-card .value {
+        .stats-value {
             font-size: 24px;
             font-weight: bold;
         }
         
-        .category-stats {
+        .category-list {
             margin-top: 20px;
         }
         
@@ -835,20 +795,20 @@ STATS_HTML = '''
         
         .progress-bar {
             width: 100%;
-            height: 10px;
+            height: 8px;
             background: #e0e0e0;
-            border-radius: 5px;
+            border-radius: 4px;
             overflow: hidden;
         }
         
         .progress-fill {
             height: 100%;
             background: linear-gradient(90deg, #667eea, #764ba2);
-            border-radius: 5px;
+            border-radius: 4px;
             transition: width 0.3s;
         }
         
-        .monthly-stats {
+        .monthly-list {
             margin-top: 20px;
         }
         
@@ -865,6 +825,7 @@ STATS_HTML = '''
         
         .month-income {
             color: #28a745;
+            margin-right: 10px;
         }
         
         .month-expense {
@@ -874,7 +835,7 @@ STATS_HTML = '''
         .btn {
             padding: 12px 24px;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
@@ -898,44 +859,48 @@ STATS_HTML = '''
             
             <div class="stats-grid">
                 <div class="stats-card">
-                    <h3>Jami daromad</h3>
-                    <div class="value">{{ "{:,.0f}".format(total_income) }} so'm</div>
+                    <div class="stats-label">Jami daromad</div>
+                    <div class="stats-value">{{ "{:,.0f}".format(total_income) }} so'm</div>
                 </div>
                 <div class="stats-card">
-                    <h3>Jami xarajat</h3>
-                    <div class="value">{{ "{:,.0f}".format(total_expense) }} so'm</div>
+                    <div class="stats-label">Jami xarajat</div>
+                    <div class="stats-value">{{ "{:,.0f}".format(total_expense) }} so'm</div>
                 </div>
             </div>
             
-            <div class="category-stats">
-                <h2>📉 Xarajatlar kategoriyalari</h2>
-                {% for cat, amount, percent in expense_cats %}
-                <div class="category-item">
-                    <div class="category-header">
-                        <span class="category-name">{{ cat }}</span>
-                        <span class="category-amount">{{ "{:,.0f}".format(amount) }} so'm ({{ "%.1f"|format(percent) }}%)</span>
+            <div class="card" style="padding: 20px;">
+                <h3>📉 Xarajatlar kategoriyalari</h3>
+                <div class="category-list">
+                    {% for cat, amount, percent in expense_cats %}
+                    <div class="category-item">
+                        <div class="category-header">
+                            <span class="category-name">{{ cat }}</span>
+                            <span class="category-amount">{{ "{:,.0f}".format(amount) }} so'm ({{ "%.1f"|format(percent) }}%)</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: {{ percent }}%"></div>
+                        </div>
                     </div>
-                    <div class="progress-bar">
-                        <div class="progress-fill" style="width: {{ percent }}%"></div>
+                    {% endfor %}
+                </div>
+            </div>
+            
+            <div class="card" style="padding: 20px;">
+                <h3>📅 Oylik statistika</h3>
+                <div class="monthly-list">
+                    {% for month, income, expense in monthly_stats %}
+                    <div class="month-item">
+                        <span class="month-name">{{ month }}</span>
+                        <span>
+                            <span class="month-income">+{{ "{:,.0f}".format(income) }}</span>
+                            <span class="month-expense">-{{ "{:,.0f}".format(expense) }}</span>
+                        </span>
                     </div>
+                    {% endfor %}
                 </div>
-                {% endfor %}
             </div>
             
-            <div class="monthly-stats">
-                <h2>📅 Oylik statistika</h2>
-                {% for month, income, expense in monthly_stats %}
-                <div class="month-item">
-                    <span class="month-name">{{ month }}</span>
-                    <span>
-                        <span class="month-income">+{{ "{:,.0f}".format(income) }}</span>
-                        <span class="month-expense"> -{{ "{:,.0f}".format(expense) }}</span>
-                    </span>
-                </div>
-                {% endfor %}
-            </div>
-            
-            <button class="btn" onclick="location.href='/webapp/{{ user_id }}'">
+            <button class="btn" onclick="location.href='/user/{{ user_id }}'">
                 🔙 Orqaga
             </button>
         </div>
@@ -944,46 +909,19 @@ STATS_HTML = '''
 </html>
 '''
 
-# Ma'lumotlar bazasi
-def init_database():
-    conn = sqlite3.connect('finance.db')
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                (user_id INTEGER PRIMARY KEY,
-                 username TEXT,
-                 first_name TEXT)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions
-                (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 user_id INTEGER,
-                 amount REAL,
-                 description TEXT,
-                 category TEXT,
-                 type TEXT,
-                 date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS categories
-                (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 user_id INTEGER,
-                 name TEXT,
-                 type TEXT)''')
-    
-    conn.commit()
-    conn.close()
-
+# Database functions
 def get_user_data(user_id):
-    conn = sqlite3.connect('finance.db')
+    conn = get_db()
     c = conn.cursor()
     
-    # Balans
+    # Balance
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
     income = c.fetchone()[0] or 0
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
     expense = c.fetchone()[0] or 0
     balance = income - expense
     
-    # Bugungi statistika
+    # Today
     today = datetime.now().strftime("%Y-%m-%d")
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income' AND date LIKE ?", 
              (user_id, f"{today}%"))
@@ -992,10 +930,10 @@ def get_user_data(user_id):
              (user_id, f"{today}%"))
     today_expense = c.fetchone()[0] or 0
     
-    # Oxirgi operatsiyalar
+    # Recent transactions
     c.execute('''SELECT amount, description, category, type, 
                 strftime('%d.%m.%Y %H:%M', date) as datetime 
-                FROM transactions WHERE user_id=? ORDER BY date DESC LIMIT 5''', (user_id,))
+                FROM transactions WHERE user_id=? ORDER BY date DESC LIMIT 10''', (user_id,))
     transactions = []
     for row in c.fetchall():
         transactions.append({
@@ -1010,20 +948,19 @@ def get_user_data(user_id):
     return balance, today_income, today_expense, transactions
 
 def get_categories(user_id, trans_type):
-    conn = sqlite3.connect('finance.db')
+    conn = get_db()
     c = conn.cursor()
     
-    # Default kategoriyalar
     default_cats = {
         'income': ['💰 Ish haqi', '💼 Bonus', '📱 Freelance', '🎁 Sovg\'a', '💹 Investitsiya'],
-        'expense': ['🍽️ Ovqat', '🚖 Transport', '🛒 Kiyim', '🏠 Uy', '📞 Telefon', '🎮 Ko\'ngilochar', '🏥 Sog\'liq', '📚 Ta\'lim']
+        'expense': ['🍽️ Ovqat', '🚖 Transport', '🛒 Kiyim', '🏠 Uy', '📞 Telefon', 
+                    '🎮 Ko\'ngilochar', '🏥 Sog\'liq', '📚 Ta\'lim', '🐾 Boshqa']
     }
     
     c.execute("SELECT name FROM categories WHERE user_id=? AND type=?", (user_id, trans_type))
     db_cats = [row[0] for row in c.fetchall()]
     
     if not db_cats:
-        # Default kategoriyalarni qo'shish
         for cat in default_cats[trans_type]:
             c.execute("INSERT INTO categories (user_id, name, type) VALUES (?, ?, ?)",
                      (user_id, cat, trans_type))
@@ -1036,7 +973,7 @@ def get_categories(user_id, trans_type):
     return categories
 
 def add_transaction(user_id, amount, description, category, trans_type):
-    conn = sqlite3.connect('finance.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute('''INSERT INTO transactions (user_id, amount, description, category, type)
                 VALUES (?, ?, ?, ?, ?)''',
@@ -1044,8 +981,8 @@ def add_transaction(user_id, amount, description, category, trans_type):
     conn.commit()
     conn.close()
 
-def get_history(user_id, limit=50):
-    conn = sqlite3.connect('finance.db')
+def get_history(user_id, limit=100):
+    conn = get_db()
     c = conn.cursor()
     c.execute('''SELECT amount, description, category, type, 
                 strftime('%d.%m.%Y %H:%M', date) as datetime 
@@ -1064,16 +1001,14 @@ def get_history(user_id, limit=50):
     return transactions
 
 def get_stats(user_id):
-    conn = sqlite3.connect('finance.db')
+    conn = get_db()
     c = conn.cursor()
     
-    # Jami daromad va xarajat
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='income'", (user_id,))
     total_income = c.fetchone()[0] or 0
     c.execute("SELECT SUM(amount) FROM transactions WHERE user_id=? AND type='expense'", (user_id,))
     total_expense = c.fetchone()[0] or 0
     
-    # Kategoriyalar bo'yicha xarajatlar
     c.execute('''SELECT category, SUM(amount) FROM transactions 
                 WHERE user_id=? AND type='expense' 
                 GROUP BY category ORDER BY SUM(amount) DESC''', (user_id,))
@@ -1082,7 +1017,6 @@ def get_stats(user_id):
         percent = (amount / total_expense * 100) if total_expense > 0 else 0
         expense_cats.append((cat, amount, percent))
     
-    # Oylik statistika
     c.execute('''SELECT strftime('%Y-%m', date) as month,
                        SUM(CASE WHEN type='income' THEN amount ELSE 0 END) as income,
                        SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) as expense
@@ -1102,18 +1036,82 @@ def get_stats(user_id):
     return total_income, total_expense, expense_cats, monthly_stats
 
 # Flask routes
-@app.route('/webapp/<int:user_id>')
-def webapp_main(user_id):
+@app.route('/')
+def home():
+    return '''
+    <html>
+    <head>
+        <title>Moliya Hisobchisi</title>
+        <style>
+            body {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            }
+            .container {
+                background: white;
+                padding: 40px;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                text-align: center;
+                max-width: 400px;
+            }
+            h1 { color: #333; margin-bottom: 20px; }
+            input { 
+                padding: 15px; 
+                width: 100%; 
+                margin-bottom: 20px;
+                border: 2px solid #e0e0e0;
+                border-radius: 10px;
+                font-size: 16px;
+            }
+            button {
+                padding: 15px 30px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 16px;
+                cursor: pointer;
+                width: 100%;
+            }
+            button:hover { transform: translateY(-2px); }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>💰 Moliya Hisobchisi</h1>
+            <p>Telegram ID-ingizni kiriting:</p>
+            <input type="number" id="userId" placeholder="Masalan: 123456789">
+            <button onclick="goToUser()">Kirish</button>
+        </div>
+        <script>
+            function goToUser() {
+                const userId = document.getElementById('userId').value;
+                if (userId) {
+                    window.location.href = '/user/' + userId;
+                }
+            }
+        </script>
+    </body>
+    </html>
+    '''
+
+@app.route('/user/<int:user_id>')
+def user_dashboard(user_id):
     balance, today_income, today_expense, transactions = get_user_data(user_id)
-    return render_template_string(WEB_APP_HTML, 
+    return render_template_string(MAIN_HTML, 
                                  user_id=user_id,
                                  balance=balance,
                                  today_income=today_income,
                                  today_expense=today_expense,
                                  transactions=transactions)
 
-@app.route('/webapp/income/<int:user_id>', methods=['GET', 'POST'])
-def webapp_income(user_id):
+@app.route('/income/<int:user_id>', methods=['GET', 'POST'])
+def add_income(user_id):
     categories = get_categories(user_id, 'income')
     
     if request.method == 'POST':
@@ -1123,22 +1121,22 @@ def webapp_income(user_id):
         
         add_transaction(user_id, amount, description, category, 'income')
         
-        return render_template_string(ADD_TRANSACTION_HTML,
+        return render_template_string(ADD_HTML,
                                      user_id=user_id,
                                      title="Daromad qo'shish",
                                      emoji="💰",
                                      categories=categories,
                                      success="Daromad muvaffaqiyatli qo'shildi!")
     
-    return render_template_string(ADD_TRANSACTION_HTML,
+    return render_template_string(ADD_HTML,
                                  user_id=user_id,
                                  title="Daromad qo'shish",
                                  emoji="💰",
                                  categories=categories,
                                  success=None)
 
-@app.route('/webapp/expense/<int:user_id>', methods=['GET', 'POST'])
-def webapp_expense(user_id):
+@app.route('/expense/<int:user_id>', methods=['GET', 'POST'])
+def add_expense(user_id):
     categories = get_categories(user_id, 'expense')
     
     if request.method == 'POST':
@@ -1148,29 +1146,29 @@ def webapp_expense(user_id):
         
         add_transaction(user_id, amount, description, category, 'expense')
         
-        return render_template_string(ADD_TRANSACTION_HTML,
+        return render_template_string(ADD_HTML,
                                      user_id=user_id,
                                      title="Xarajat qo'shish",
                                      emoji="💸",
                                      categories=categories,
                                      success="Xarajat muvaffaqiyatli qo'shildi!")
     
-    return render_template_string(ADD_TRANSACTION_HTML,
+    return render_template_string(ADD_HTML,
                                  user_id=user_id,
                                  title="Xarajat qo'shish",
                                  emoji="💸",
                                  categories=categories,
                                  success=None)
 
-@app.route('/webapp/history/<int:user_id>')
-def webapp_history(user_id):
-    transactions = get_history(user_id, 50)
+@app.route('/history/<int:user_id>')
+def history(user_id):
+    transactions = get_history(user_id, 100)
     return render_template_string(HISTORY_HTML,
                                  user_id=user_id,
                                  transactions=transactions)
 
-@app.route('/webapp/stats/<int:user_id>')
-def webapp_stats(user_id):
+@app.route('/stats/<int:user_id>')
+def stats(user_id):
     total_income, total_expense, expense_cats, monthly_stats = get_stats(user_id)
     return render_template_string(STATS_HTML,
                                  user_id=user_id,
@@ -1186,17 +1184,22 @@ def start(message):
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Foydalanuvchini saqlash
-    conn = sqlite3.connect('finance.db')
+    conn = get_db()
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
              (user_id, username, first_name))
     conn.commit()
     conn.close()
     
-    # Web App tugmasi
+    # Get railway URL
+    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN', '')
+    if not railway_url:
+        railway_url = request.host_url.rstrip('/') if request else ''
+    
+    webapp_url = f"{railway_url}/user/{user_id}"
+    
     markup = types.InlineKeyboardMarkup()
-    web_app = types.WebAppInfo(url=f"https://your-domain.com/webapp/{user_id}")
+    web_app = types.WebAppInfo(url=webapp_url)
     btn = types.InlineKeyboardButton("🚀 Web App ni ochish", web_app=web_app)
     markup.add(btn)
     
@@ -1208,29 +1211,77 @@ def start(message):
         reply_markup=markup
     )
 
-# Flask ni alohida threadda ishga tushirish
-def run_flask():
-    app.run(host='0.0.0.0', port=5000, debug=False)
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    help_text = """
+❓ Yordam
 
-# Botni ishga tushirish
+💰 Daromad qo'shish: /income
+💸 Xarajat qo'shish: /expense
+📊 Balans: /balance
+📜 Tarix: /history
+📈 Statistika: /stats
+
+Yoki Web App dan foydalaning!
+    """
+    bot.send_message(message.chat.id, help_text)
+
+@bot.message_handler(commands=['balance'])
+def balance_command(message):
+    user_id = message.from_user.id
+    balance, income, expense = get_user_data(user_id)[:3]
+    today_income, today_expense = get_user_data(user_id)[1:3]
+    
+    text = f"""
+💰 Balans: {balance:,.0f} so'm
+
+📊 Bugun:
+   ➕ {today_income:,.0f} so'm
+   ➖ {today_expense:,.0f} so'm
+
+📈 Jami:
+   ➕ {income:,.0f} so'm
+   ➖ {expense:,.0f} so'm
+    """
+    bot.send_message(message.chat.id, text)
+
+# Railway deploy uchun
+def run_bot():
+    while True:
+        try:
+            logger.info("Bot polling started...")
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        except Exception as e:
+            logger.error(f"Bot polling error: {e}")
+            time.sleep(10)
+
+# Flask route for health check
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok"})
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return '!', 200
+
+# Main
 if __name__ == '__main__':
-    print("=" * 50)
-    print("💰 MOLIYA HISOBCHISI BOTI (WEB APP)")
-    print("=" * 50)
+    # Setup webhook for production
+    railway_url = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+    if railway_url:
+        webhook_url = f"https://{railway_url}/webhook"
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
+    else:
+        # Start bot thread for development
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
     
-    # Ma'lumotlar bazasini yaratish
-    init_database()
-    
-    # Flask ni threadda ishga tushirish
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print("✅ Web App ishga tushdi: http://localhost:5000")
-    
-    # Botni ishga tushirish
-    print("✅ Bot ishga tushmoqda...")
-    print("=" * 50)
-    
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"❌ Xatolik: {e}")
+    # Start Flask
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
