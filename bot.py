@@ -31,7 +31,6 @@ TARIFFS = {
         "1yil": {"name": "📱 Telegram 1 yillik", "price": 220000, "days": 365, "emoji": "📱"}
     },
     "insta": {
-        "1oy": {"name": "📸 Instagram 1 oylik", "price": 6000, "days": 30, "emoji": "📸"},
         "6oy": {"name": "📸 Instagram 6 oylik", "price": 36000, "days": 180, "emoji": "📸"},
         "1yil": {"name": "📸 Instagram 1 yillik", "price": 72000, "days": 365, "emoji": "📸"}
     }
