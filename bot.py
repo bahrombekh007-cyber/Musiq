@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 USERNAME, PLATFORM, TARIFF, CHECK_PHOTO = range(4)
 
 # Admin ID (o'zingizning ID ingizni yozing)
-ADMIN_ID = 123456789  # BU YERGA O'Z IDINGIZNI YOZING
+ADMIN_ID = 8735360012  # BU YERGA O'Z IDINGIZNI YOZING
 
 # To'lov ma'lumotlari
 PAYMENT_CARD = "9860350146763007"
