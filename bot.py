@@ -254,7 +254,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # Bot tokenini o'rnating
-    token = "8641830501:AAFLEBxHvyG6Yc0Si8cSOW8tm7wE_e2mODY"  # BU YERGA BOT TOKENINGIZNI YOZING
+    token = "8635650689:AAH9mEr_gfkdh3qTTKeMvt75vlsCyX7u5Jc"  # BU YERGA BOT TOKENINGIZNI YOZING
     
     # Ma'lumotlar bazasini ishga tushirish
     init_db()
