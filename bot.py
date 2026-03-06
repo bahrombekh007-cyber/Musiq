@@ -19,7 +19,7 @@ PAYMENT_NAME = "Rustamov Bahrombek"
 PAYMENT_BANK = "TBS Bank"
 
 # Referral mukofoti
-REFERRAL_BONUS = 1000
+REFERRAL_BONUS = 5000
 
 # Tariflar
 TARIFFS = {
